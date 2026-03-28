@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/bonk-common","crates/bonk-cli","crates/bonk-runner"]
+resolver = "2"

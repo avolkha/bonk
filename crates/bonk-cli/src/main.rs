@@ -43,7 +43,7 @@ pub struct Cli {
 }
 
 pub fn extract_binary_name(image: &str) -> Result<String> {
-    let name = image.split('/').last().unwrap_or(image);
+    let name = image.split('/').next_back().unwrap_or(image);
     Ok(name.split(':').next().unwrap_or(name).to_string())
 }
 

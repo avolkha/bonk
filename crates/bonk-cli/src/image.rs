@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use tar::Archive;
 
 /// Image export and parsing logic.
-
 /// Parses the `DOCKER` environment variable into a program name and prefix args.
 /// Falls back to `"docker"` with no prefix args if the variable is not set.
 fn parse_docker_cmd(docker_cmd: &str) -> (&str, Vec<&str>) {

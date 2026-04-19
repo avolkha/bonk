@@ -246,4 +246,32 @@ mod tests {
         let msg = format!("{:#}", result.unwrap_err());
         assert!(msg.contains("BONK_TOOLS_DIR"), "expected BONK_TOOLS_DIR in: {msg}");
     }
+
+    #[test]
+    fn test_write_sections_writes_bytes_in_footer_order() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let output = tempdir.path().join("out.bin");
+        let mut file = std::fs::File::create(&output).unwrap();
+
+        let footer = write_sections(
+            &mut file,
+            b"RUN",
+            b"PAYLOAD",
+            b"B",
+            b"UNS",
+            br#"{"cmd":["echo"]}"#,
+        )
+        .unwrap();
+        drop(file);
+
+        assert_eq!(footer.payload_offset, 3);
+        assert_eq!(footer.payload_size, 7);
+        assert_eq!(footer.bwrap_size, 1);
+        assert_eq!(footer.unsquashfs_size, 3);
+        assert_eq!(footer.config_size, 16);
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            b"RUNPAYLOADBUNS{\"cmd\":[\"echo\"]}"
+        );
+    }
 }

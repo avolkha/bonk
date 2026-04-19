@@ -111,3 +111,169 @@ pub fn run(
     cmd.status().context("failed to execute bwrap")
 
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    fn make_config() -> bonk_common::ContainerConfig {
+        bonk_common::ContainerConfig {
+            entrypoint: vec!["/bin/sh".into()],
+            cmd: vec!["-c".into(), "echo from image".into()],
+            env: vec!["KEY=value".into(), "EMPTY".into()],
+            working_dir: "/work".into(),
+            user: None,
+        }
+    }
+
+    fn write_fake_bwrap(
+        dir: &Path,
+        log_path: &Path,
+        overlay_probe_success: bool,
+        exit_code: i32,
+    ) -> std::path::PathBuf {
+        let script = dir.join("fake-bwrap.sh");
+        let probe_exit = if overlay_probe_success { 0 } else { 1 };
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n\
+                 set -eu\n\
+                 if [ \"$#\" -ge 5 ] && [ \"$1\" = \"--overlay-src\" ] && [ \"$2\" = \"/\" ] && [ \"$3\" = \"--tmp-overlay\" ] && [ \"$4\" = \"/\" ] && [ \"$5\" = \"--\" ]; then\n\
+                 \texit {probe_exit}\n\
+                 fi\n\
+                 printf '%s\\n' \"$@\" > '{}'\n\
+                 exit {exit_code}\n",
+                log_path.display(),
+            ),
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).unwrap();
+        script
+    }
+
+    fn read_args(log_path: &Path) -> Vec<String> {
+        fs::read_to_string(log_path)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn assert_contains_sequence(args: &[String], expected: &[&str]) {
+        assert!(
+            args.windows(expected.len())
+                .any(|window| window.iter().map(String::as_str).eq(expected.iter().copied())),
+            "expected sequence {:?} in {:?}",
+            expected,
+            args
+        );
+    }
+
+    #[test]
+    fn test_volume_mount_parse_variants() {
+        let mount = VolumeMount::parse("/host:/guest:ro");
+        assert_eq!(mount.host, "/host");
+        assert_eq!(mount.guest, "/guest");
+        assert!(mount.read_only);
+
+        let mount = VolumeMount::parse("/host:/guest");
+        assert_eq!(mount.host, "/host");
+        assert_eq!(mount.guest, "/guest");
+        assert!(!mount.read_only);
+
+        let mount = VolumeMount::parse("host-only");
+        assert_eq!(mount.host, "host-only");
+        assert_eq!(mount.guest, "");
+        assert!(!mount.read_only);
+    }
+
+    #[test]
+    fn test_resolve_cmd_prefers_extra_args_and_falls_back_through_image_config() {
+        let config = make_config();
+
+        assert_eq!(
+            resolve_cmd(&config, &["echo".into(), "override".into()]).unwrap(),
+            vec!["echo".to_string(), "override".to_string()]
+        );
+        assert_eq!(
+            resolve_cmd(
+                &bonk_common::ContainerConfig {
+                    cmd: vec!["echo".into()],
+                    ..bonk_common::ContainerConfig::default()
+                },
+                &[],
+            )
+            .unwrap(),
+            vec!["echo".to_string()]
+        );
+        assert!(resolve_cmd(&bonk_common::ContainerConfig::default(), &[]).is_err());
+    }
+
+    #[test]
+    fn test_run_uses_overlay_and_passes_expected_arguments() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let log_path = tempdir.path().join("args.log");
+        let bwrap = write_fake_bwrap(tempdir.path(), &log_path, true, 7);
+        let rootfs = tempdir.path().join("rootfs");
+        fs::create_dir_all(&rootfs).unwrap();
+        let volumes = vec![VolumeMount::parse("/tmp/host:/guest:ro")];
+
+        let status = run(
+            &rootfs,
+            &make_config(),
+            &["echo".into(), "hi".into()],
+            &volumes,
+            Some(&bwrap),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(status.code(), Some(7));
+
+        let args = read_args(&log_path);
+        assert_contains_sequence(
+            &args,
+            &["--overlay-src", rootfs.to_str().unwrap(), "--tmp-overlay", "/"],
+        );
+        assert_contains_sequence(&args, &["--ro-bind", "/tmp/host", "/guest"]);
+        assert_contains_sequence(&args, &["--setenv", "KEY", "value"]);
+        assert_contains_sequence(&args, &["--setenv", "EMPTY", ""]);
+        assert_contains_sequence(&args, &["--new-session", "--clearenv"]);
+        assert_contains_sequence(&args, &["--chdir", "/work", "--", "echo", "hi"]);
+    }
+
+    #[test]
+    fn test_run_falls_back_to_bind_mount_when_overlay_probe_fails() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let log_path = tempdir.path().join("args.log");
+        let bwrap = write_fake_bwrap(tempdir.path(), &log_path, false, 0);
+        let rootfs = tempdir.path().join("rootfs");
+        fs::create_dir_all(&rootfs).unwrap();
+
+        let status = run(
+            &rootfs,
+            &bonk_common::ContainerConfig {
+                cmd: vec!["echo".into(), "from-image".into()],
+                ..bonk_common::ContainerConfig::default()
+            },
+            &[],
+            &[],
+            Some(&bwrap),
+            false,
+        )
+        .unwrap();
+
+        assert!(status.success());
+
+        let args = read_args(&log_path);
+        assert_contains_sequence(&args, &["--bind", rootfs.to_str().unwrap(), "/"]);
+        assert!(!args.iter().any(|arg| arg == "--overlay-src"));
+        assert_contains_sequence(&args, &["--", "echo", "from-image"]);
+    }
+}

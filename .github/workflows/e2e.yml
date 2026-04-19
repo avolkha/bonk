@@ -21,5 +21,18 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Probe bwrap
+        run: |
+          echo "=== bwrap version ==="
+          bwrap --version
+          echo "=== /etc/subuid ==="
+          cat /etc/subuid || echo "(missing)"
+          echo "=== /etc/subgid ==="
+          cat /etc/subgid || echo "(missing)"
+          echo "=== unshare-all uid=0 probe ==="
+          bwrap --unshare-all --share-net --uid 0 --gid 0 \
+            --bind / / --dev /dev --proc /proc \
+            -- echo "bwrap-ok" && echo "probe: PASS" || echo "probe: FAIL (exit $?)"
+
       - name: Run e2e tests
         run: bash tests/e2e.sh

@@ -41,10 +41,11 @@ fi
 
 echo "==> Building release binaries..."
 cargo build --release --quiet
-cp target/release/bonk target/release/bonk-runner ~/.cargo/bin/
+
+BONK="$REPO_ROOT/target/release/bonk"
 
 echo "==> Packing alpine:latest..."
-bonk alpine:latest /tmp/bonk-e2e-alpine
+"$BONK" alpine:latest /tmp/bonk-e2e-alpine
 ALPINE=/tmp/bonk-e2e-alpine
 
 echo ""

@@ -15,6 +15,9 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y bubblewrap squashfs-tools
 
+      - name: Pull test images
+        run: docker pull alpine:latest
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 

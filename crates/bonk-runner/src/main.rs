@@ -37,7 +37,7 @@ fn main() -> Result<()> {
         eprintln!("A bonk-generated container binary.");
         eprintln!();
         eprintln!("USAGE:");
-        eprintln!("  {bin_name} [OPTIONS] [-- CMD [ARGS...]]" );
+        eprintln!("  {bin_name} [OPTIONS] [-- CMD [ARGS...]]");
         eprintln!();
         eprintln!("OPTIONS:");
         eprintln!("  -v, --volume HOST:GUEST[:ro]   Bind-mount a host path into the container.");
@@ -90,8 +90,6 @@ fn main() -> Result<()> {
         }
         i += 1;
     }
-
-
 
     let exe_data = std::fs::read("/proc/self/exe").context("failed to read own binary")?;
     if exe_data.len() < FOOTER_SIZE {

@@ -80,7 +80,11 @@ fn main() -> Result<()> {
     let image_dir = export_image(&cli.image, tempdir.path()).context("failed to export image")?;
     log!(cli.quiet, "bonk: [2/5] parsing manifest...");
     let (config, layer_paths) = image::parse_image(&image_dir)?;
-    log!(cli.quiet, "bonk: [3/5] flattening {} layer(s)...", layer_paths.len());
+    log!(
+        cli.quiet,
+        "bonk: [3/5] flattening {} layer(s)...",
+        layer_paths.len()
+    );
     let rootfs_path = tempdir.path().join("rootfs");
     flatten_layers(&layer_paths, &rootfs_path).context("failed to flatten image layers")?;
     log!(cli.quiet, "bonk: [4/5] compressing rootfs...");
@@ -94,7 +98,12 @@ fn main() -> Result<()> {
         cli.unsquashfs_path.as_deref().map(Path::new),
     )
     .context("failed to assemble binary")?;
-    log!(cli.quiet, "bonk: done — wrote {} ({})", output, human_size(total));
+    log!(
+        cli.quiet,
+        "bonk: done — wrote {} ({})",
+        output,
+        human_size(total)
+    );
 
     Ok(())
 }

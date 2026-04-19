@@ -108,6 +108,17 @@ pub fn parse_image(image_dir: &Path) -> Result<(ContainerConfig, Vec<PathBuf>)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    fn write_image_fixture(
+        tempdir: &tempfile::TempDir,
+        manifest: &str,
+        config_name: &str,
+        config: &str,
+    ) {
+        fs::write(tempdir.path().join("manifest.json"), manifest).unwrap();
+        fs::write(tempdir.path().join(config_name), config).unwrap();
+    }
 
     #[test]
     fn test_parse_docker_cmd_default() {
@@ -153,5 +164,66 @@ mod tests {
     fn test_get_export_image_path_empty_image() {
         let result = get_export_image_path("", Path::new("/tmp/work"));
         assert!(result.is_err(), "expected error for empty image name");
+    }
+
+    #[test]
+    fn test_parse_image_reads_layers_and_normalizes_empty_fields() {
+        let tempdir = tempfile::tempdir().unwrap();
+        write_image_fixture(
+            &tempdir,
+            r#"[{"Config":"config.json","Layers":["layer1.tar","nested/layer2.tar"]}]"#,
+            "config.json",
+            r#"{"config":{"Entrypoint":["/bin/sh"],"Cmd":["-c","echo hi"],"Env":["A=1"],"WorkingDir":"","User":""}}"#,
+        );
+
+        let (config, layers) = parse_image(tempdir.path()).unwrap();
+
+        assert_eq!(config.entrypoint, vec!["/bin/sh"]);
+        assert_eq!(config.cmd, vec!["-c", "echo hi"]);
+        assert_eq!(config.env, vec!["A=1"]);
+        assert_eq!(config.working_dir, "/");
+        assert_eq!(config.user, None);
+        assert_eq!(
+            layers,
+            vec![
+                tempdir.path().join("layer1.tar"),
+                tempdir.path().join("nested/layer2.tar"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_image_defaults_when_config_section_is_missing() {
+        let tempdir = tempfile::tempdir().unwrap();
+        write_image_fixture(
+            &tempdir,
+            r#"[{"Config":"config.json","Layers":[]}]"#,
+            "config.json",
+            r#"{"config":null}"#,
+        );
+
+        let (config, layers) = parse_image(tempdir.path()).unwrap();
+
+        assert!(config.entrypoint.is_empty());
+        assert!(config.cmd.is_empty());
+        assert!(config.env.is_empty());
+        assert_eq!(config.working_dir, "/");
+        assert_eq!(config.user, None);
+        assert!(layers.is_empty());
+    }
+
+    #[test]
+    fn test_parse_image_rejects_manifests_with_multiple_images() {
+        let tempdir = tempfile::tempdir().unwrap();
+        write_image_fixture(
+            &tempdir,
+            r#"[{"Config":"config.json","Layers":[]},{"Config":"config.json","Layers":[]}]"#,
+            "config.json",
+            r#"{"config":null}"#,
+        );
+
+        let error = parse_image(tempdir.path()).unwrap_err();
+
+        assert!(format!("{error:#}").contains("expected exactly 1 image"));
     }
 }

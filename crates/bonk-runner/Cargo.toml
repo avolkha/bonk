@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bonk-common = { path = "../bonk-common" }
+anyhow = "1"
+serde_json = "1"
+which = "1"
+libc = "0.2"

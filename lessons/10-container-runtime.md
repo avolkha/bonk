@@ -147,6 +147,56 @@ for kv in &config.env {
 
 `split_once` splits on the first occurrence only — important for values that contain `=`.
 
+### Root vs. rootless UID mapping
+
+When run as a normal user, bwrap creates a user namespace and maps the calling
+user to UID 0 inside the container. This works transparently with `--uid 0
+--gid 0`.
+
+But when run as **root**, bwrap's `--unshare-user` is redundant (you're already
+UID 0), and some bwrap versions refuse it or behave differently. The runner
+should detect this and adjust:
+
+```rust
+let is_root = unsafe { libc::getuid() } == 0;
+
+if is_root {
+    // Already root — don't create a user namespace
+    cmd.arg("--unshare-ipc")
+       .arg("--unshare-pid")
+       .arg("--unshare-uts")
+       .arg("--unshare-cgroup");
+    // No --unshare-user, no --uid/--gid (already 0)
+} else {
+    cmd.arg("--unshare-all")
+       .arg("--share-net")
+       .arg("--uid").arg("0")
+       .arg("--gid").arg("0");
+}
+```
+
+Add `libc` as a dependency in `crates/bonk-runner/Cargo.toml`:
+
+```toml
+libc = "0.2"
+```
+
+This addresses a class of bugs reported in similar tools (dockerc #44) where
+running as root panics due to missing UID mappings.
+
+### TTY-aware stdin handling
+
+Pass the `stdin_is_tty` flag from the argument parser (lesson 09) through to
+`runtime::run`. When stdin is not a terminal, the runner should avoid any
+terminal-related setup. For bwrap this is straightforward — bwrap doesn't
+allocate a PTY by default — but if you ever add OCI runtime support (crun),
+you'll need to set `"terminal": false` in the config when `!stdin_is_tty`.
+
+For now, the practical effect is that the runner should **not** pass `--new-session`
+to bwrap when stdin is piped, since `--new-session` creates a new session which
+detaches from the controlling terminal and can cause signal-handling issues with
+piped input.
+
 ---
 
 ## Tasks
@@ -219,28 +269,33 @@ pub fn run(
     extra_args: &[String],
     volumes: &[VolumeMount],
     bwrap_bin: Option<&Path>,
+    stdin_is_tty: bool,
 ) -> Result<ExitStatus>
 ```
 
 Build the `bwrap` command step by step:
-
+me::run not yet implemented")
+}
 1. Determine the `bwrap` binary: use `bwrap_bin` if provided (embedded tool), then check `BONK_BWRAP` env var, then fall back to `"bwrap"` from PATH
-2. Probe for bwrap overlay support: spawn `bwrap --overlay-src / --tmp-overlay / -- true` and check the exit code. If it succeeds, use overlay mode; otherwise fall back to `--bind rootfs /`
+2. Probe for bwrap overlay support: spawn `bwrap --overlay-src / --tmp-overlay / -- true`:and check the exit code. If it succeeds, use overlay mode; otherwise fall back to `--bind rootfs /`
 3. Overlay mode: `--overlay-src rootfs / --tmp-overlay /` — read-only lower layer + disposable upper
 4. Fallback mode: `--bind rootfs /` — direct read-write access (bwrap < 0.9)
-3. `--dev /dev` — expose device nodes
-4. `--proc /proc` — mount procfs
-5. `--tmpfs /tmp` and `--tmpfs /run`
-6. For each volume: `--bind host guest` or `--ro-bind host guest`
-7. `--unshare-all` and `--share-net`
-8. `--uid 0 --gid 0`
-9. `--hostname bonk`
-10. `--ro-bind /etc/resolv.conf /etc/resolv.conf` (for DNS)
-11. `--clearenv`
-12. For each `KEY=VALUE` in `config.env`: `--setenv KEY VALUE`
-13. Pass through `TERM` from the host: `--setenv TERM <value-of-TERM>`
-14. `--chdir <config.working_dir>`
-15. `--` followed by `resolve_command(config, extra_args)`
+5. `--dev /dev` — expose device nodes
+6. `--proc /proc` — mount procfs
+7. `--tmpfs /tmp` and `--tmpfs /run`
+8. For each volume: `--bind host guest` or `--ro-bind host guest`
+9. **Namespace and UID handling (root-aware):**
+   - Detect if running as root: `unsafe { libc::getuid() } == 0`
+   - If **rootless**: `--unshare-all --share-net --uid 0 --gid 0`
+   - If **root**: `--unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup` (no `--unshare-user`, no `--uid`/`--gid` — already UID 0)
+10. `--hostname bonk`
+11. `--ro-bind /etc/resolv.conf /etc/resolv.conf` (for DNS)
+12. Only add `--new-session` if `stdin_is_tty` is `true` — when stdin is piped, `--new-session` causes signal delivery issues
+13. `--clearenv`
+14. For each `KEY=VALUE` in `config.env`: `--setenv KEY VALUE`
+15. Pass through `TERM` from the host: `--setenv TERM <value-of-TERM>`
+16. `--chdir <config.working_dir>`
+17. `--` followed by `resolve_command(config, extra_args)`
 
 Run with `.status()?` and return `Ok(status)`.
 
@@ -263,6 +318,18 @@ ls tools/x86_64/bwrap tools/x86_64/unsquashfs
 # Basic test
 bonk alpine:latest
 ./alpine echo "hello from a bonk container"
+
+# Quiet mode — no progress output
+bonk -q alpine:latest -o alpine-quiet
+./alpine-quiet -q echo "silent run"
+
+# Piped stdin (verifies TTY detection — dockerc #52)
+echo "hello" | ./alpine cat
+# Should print "hello" without crashing
+
+# Verify it works when run as root (dockerc #44)
+sudo ./alpine id
+# Should print uid=0(root) without panic
 
 # Verify embedded tools were extracted
 ls /tmp/bonk-*/bin/
@@ -298,6 +365,8 @@ This is not about being identical — it's about understanding the tradeoffs.
 1. Why does `--unshare-all --share-net` make sense for a container tool? What would break with `--unshare-all` alone?
 2. Why does `resolve_command` replace CMD with extra_args rather than appending to CMD?
 3. If the user passes `./alpine -v ./data:/data -- bash -c "ls /data"`, trace through the argument parser and `runtime.rs` step by step. What exactly does bwrap receive?
+4. Why do we skip `--unshare-user` when running as root? What would happen if we kept it?
+5. Why is `--new-session` only safe when stdin is a terminal? What goes wrong with piped input?
 
 ---
 

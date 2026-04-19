@@ -98,6 +98,28 @@ bit is set. In Rust:
 
 `0o755` in octal = owner can read/write/execute, group and others can read/execute.
 
+### Conditional logging with a `--quiet` flag
+
+Real CLI tools let users suppress progress output. Rather than scattering
+`if !quiet { eprintln!(...) }` throughout your code, add a `--quiet` / `-q`
+flag to the `Cli` struct and use a simple macro or helper:
+
+```rust
+/// Print a progress message to stderr unless --quiet was given.
+macro_rules! log {
+    ($quiet:expr, $($arg:tt)*) => {
+        if !$quiet {
+            eprintln!($($arg)*);
+        }
+    };
+}
+```
+
+Then replace bare `eprintln!` calls with `log!(cli.quiet, "bonk: exporting image {}...", cli.image);`.
+
+This addresses a common complaint with similar tools (dockerc #51): noisy
+progress output that interferes with scripts or piped usage.
+
 ### Locating `bonk-runner` at runtime
 
 When `bonk` runs, it needs to find the `bonk-runner` binary to embed it. Three strategies in order of preference:
@@ -194,7 +216,21 @@ pub fn assemble(output: &str, payload: &[u8], config: &ContainerConfig, bwrap_pa
 8. Compute total size: sum of all section lengths
 9. Return `Ok(total_size)`
 
-### Task 5 — Wire it up
+### Task 5 — Add `--quiet` flag to the CLI
+
+In `main.rs`, add a `--quiet` / `-q` flag to the `Cli` struct:
+
+```rust
+/// Suppress progress output
+#[arg(short, long)]
+quiet: bool,
+```
+
+Define the `log!` macro as shown in the Concepts section, and replace all
+bare `eprintln!` progress calls with `log!(cli.quiet, ...)`. Error messages
+should still always print — only progress/status messages should be suppressed.
+
+### Task 6 — Wire it up
 
 In `main.rs`:
 
@@ -204,7 +240,7 @@ let total = pack::assemble(&output_path, &payload, &config)?;
 eprintln!("bonk: wrote {} ({})", output_path, bonk_common::human_size(total));
 ```
 
-### Task 6 — Verify
+### Task 7 — Verify
 
 ```bash
 # Install squashfs-tools if needed

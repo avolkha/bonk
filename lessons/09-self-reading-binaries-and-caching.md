@@ -28,6 +28,8 @@ let data = std::fs::read("/proc/self/exe")?;
 
 This is how `bonk-runner` finds its own embedded payload — it reads itself and then slices out the payload section using the footer offsets.
 
+> **Note:** This is a well-known trick used by any tool that wants to ship "data + code as one file" without depending on an installer or external files. Self-extracting archives (makeself, WinRAR SFX), UPX, PyInstaller, and dockerc (the direct inspiration for bonk) all use the same approach.
+
 ### Byte-slice indexing
 
 A `Vec<u8>` or `&[u8]` can be sliced like an array:
@@ -41,6 +43,22 @@ let last_n = &data[data.len()-32..]; // last 32 bytes
 ```
 
 Indexing with a range returns a `&[u8]` slice. Out-of-bounds indexing **panics** at runtime — validate lengths before indexing.
+
+A `&[u8]` slice is just a fat pointer: a memory address plus a length. It doesn't copy any data — it's a view into the original `Vec<u8>`. This is important for bonk-runner: the executable can be tens of megabytes, but slicing out the config or payload sections is effectively free. The data only gets copied when you explicitly call `.to_vec()` or pass it to something that needs ownership.
+
+When you need to find data at the *end* of a buffer (e.g. a footer), the idiomatic pattern is:
+
+```rust
+let footer_bytes = &data[data.len() - FOOTER_SIZE..];
+```
+
+This is exactly how `Footer::from_bytes` works internally — it reads the last 56 bytes regardless of how large the binary is.
+
+In bonk, byte-slice indexing is used in three places:
+
+- **`bonk-runner/main.rs`** — slices the payload and config sections out of the full executable using offsets from the footer
+- **`bonk-common/src/lib.rs`** — `Footer::from_bytes` slices the last 56 bytes to parse the footer struct
+- **`bonk-cli/src/pack.rs`** — `write_sections` writes each section in sequence; the offsets it records are later used by the runner to slice them back out
 
 ### Converting a slice to a fixed-size array reference
 
@@ -99,6 +117,7 @@ let args: Vec<String> = std::env::args().collect();
 
 let mut volumes: Vec<VolumeMount> = Vec::new();
 let mut extra_args: Vec<String> = Vec::new();
+let mut quiet = false;
 let mut saw_sep = false;   // true once we see "--"
 
 let mut i = 1;
@@ -108,6 +127,8 @@ while i < args.len() {
         extra_args.push(arg.clone());
     } else if arg == "--" {
         saw_sep = true;
+    } else if arg == "-q" || arg == "--quiet" {
+        quiet = true;
     } else if arg == "-v" || arg == "--volume" {
         i += 1;
         // args[i] is the volume spec
@@ -121,6 +142,25 @@ while i < args.len() {
     i += 1;
 }
 ```
+
+### TTY detection with `std::io::IsTerminal`
+
+When a container binary is invoked via a pipe (`echo hi | ./alpine ...`), stdin
+is not a terminal. Many container runtimes default to `terminal: true` in the
+OCI config, which causes a `tcgetattr` failure when stdin is not a TTY
+(dockerc #52). Detect this at runtime:
+
+```rust
+use std::io::IsTerminal;
+
+let stdin_is_tty = std::io::stdin().is_terminal();
+```
+
+The runner should pass this information to the runtime so it can decide whether
+to allocate a pseudo-terminal. In practice, for bwrap-based containers this
+means you **don't** need to do anything special (bwrap doesn't set `terminal`),
+but you should avoid wrapping in `script` or `socat` for TTY emulation unless
+stdin is actually a terminal.
 
 ### `std::process::exit`
 
@@ -159,6 +199,7 @@ If the first argument is `"--help"` or `"-h"`, print a usage message to stdout a
 
 - That this is a bonk-generated container binary
 - The `-v HOST:GUEST[:ro]` flag for volume mounts
+- The `-q` / `--quiet` flag to suppress progress output
 - The `--` separator for CMD arguments
 - The `BONK_BWRAP=<path>` environment variable
 
@@ -169,6 +210,11 @@ Implement the argument parsing loop described in the concepts section. You'll ne
 Collect:
 - `volumes: Vec<VolumeMount>` — one per `-v` flag
 - `extra_args: Vec<String>` — CMD override arguments
+- `quiet: bool` — set to `true` if `-q` or `--quiet` is given
+- `stdin_is_tty: bool` — detect with `std::io::stdin().is_terminal()`
+
+Use the same `log!` macro pattern from lesson 08 to guard progress messages
+behind `!quiet`. The runner should use `log!` for cache extraction messages.
 
 ### Task 3 — Read the executable
 
@@ -223,14 +269,14 @@ for the bwrap and unsquashfs paths.
 
 ### Task 7 — Launch
 
-Call `runtime::run(&rootfs_path, &config, &extra_args, &volumes, bwrap_path.as_deref())` — this returns
+Call `runtime::run(&rootfs_path, &config, &extra_args, &volumes, bwrap_path.as_deref(), stdin_is_tty)` — this returns
 a `Result<std::process::ExitStatus>`. The `bwrap_path` is `Some(path)` if the
 footer has embedded tools, or `None` for binaries without embedded tools (falls back to system `bwrap`).
 
 No cleanup is needed (no FUSE daemon to unmount), so just exit with the code:
 
 ```rust
-let status = runtime::run(&rootfs_path, &config, &extra_args, &volumes, bwrap_path.as_deref())?;
+let status = runtime::run(&rootfs_path, &config, &extra_args, &volumes, bwrap_path.as_deref(), stdin_is_tty)?;
 std::process::exit(status.code().unwrap_or(1));
 ```
 

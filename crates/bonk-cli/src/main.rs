@@ -4,6 +4,19 @@ mod pack;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use crate::image::export_image;
+use crate::flatten::flatten_layers;
+use crate::pack::build_squashfs;
+use crate::pack::assemble;
+use bonk_common::human_size;
+use std::path::Path;
+
+macro_rules! log {
+    ($quiet:expr, $($arg:tt)*) => {
+        if !$quiet {
+            eprintln!($($arg)*);
+        }
+    };
+}
 
 #[derive(Debug, Clone, clap::Parser)]
 #[command(
@@ -22,7 +35,11 @@ pub struct Cli{
     // Path to a static bwrap binary to embed (overrides automatic search)
     bwrap_path: Option<String>,
     // Path to a static unsquashfs binary to embed (overrides automatic search)
-    unsquashfs_path: Option<String>
+    unsquashfs_path: Option<String>,
+
+    /// Suppress progress output
+    #[arg(short, long)]
+    quiet: bool,
 }
 
 pub fn extract_binary_name(image: &str) -> Result<String> {
@@ -42,16 +59,28 @@ fn main() -> Result<()> {
     }
     let tempdir = tempfile::tempdir().context("failed to create temp directory")?;
 
-    println!("Image: {}", cli.image);
-    println!("Output: {}", output);
-    eprintln!("Exporting image {}... ", cli.image);
+    log!(cli.quiet, "Image: {}", cli.image);
+    log!(cli.quiet, "Output: {}", output);
+    log!(cli.quiet, "Exporting image {}... ", cli.image);
     let image_dir = export_image(&cli.image, tempdir.path()).context("failed to export image")?;
-    eprintln!("Parsing image manifest... ");
+    log!(cli.quiet, "Parsing image manifest... ");
     let (config, layer_paths) = image::parse_image(&image_dir)?;
-    eprintln!("Flattening image layers... ");
-    eprintln!("Compressing rootfs with mksquashfs... ");
-    eprintln!("Assembling binary... ");
-    eprintln!("→ {}", output);
+    log!(cli.quiet, "Flattening image layers... ");
+    let rootfs_path = tempdir.path().join("rootfs");
+    flatten_layers(&layer_paths, &rootfs_path).context("failed to flatten image layers")?;
+    log!(cli.quiet, "Compressing rootfs with mksquashfs... ");
+    let payload = build_squashfs(&rootfs_path).context("failed to build squashfs")?;
+    
+    log!(cli.quiet, "Assembling binary... ");
+    let total = assemble(
+        &output,
+        &payload,
+        &config,
+        cli.bwrap_path.as_deref().map(Path::new),
+        cli.unsquashfs_path.as_deref().map(Path::new),
+    ).context("failed to assemble binary")?;
+    log!(cli.quiet, "bonk: wrote {} ({})", output, human_size(total));
+
     Ok(())
 }
 

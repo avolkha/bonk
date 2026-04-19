@@ -22,21 +22,43 @@ macro_rules! log {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
+    let bin_name = args
+        .first()
+        .and_then(|s| std::path::Path::new(s).file_name())
+        .and_then(|s| s.to_str())
+        .unwrap_or("<binary>");
+
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        eprintln!("{} (bonk-runner {})", bin_name, env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
+
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        let name = args.first().map(|s| s.as_str()).unwrap_or("alpine");
-        eprintln!("This is a bonk-generated container binary.");
-        eprintln!("Usage: {} [-q] [-v HOST:GUEST[:ro]] [-- CMD...]", name);
+        eprintln!("A bonk-generated container binary.");
         eprintln!();
-        eprintln!("Options:");
-        eprintln!("  -v HOST:GUEST[:ro]   Bind-mount a host path into the container");
-        eprintln!("                       Append :ro for read-only. Repeatable.");
-        eprintln!("  -q, --quiet          Suppress progress output");
-        eprintln!("  --                   Separator between bonk flags and CMD args");
+        eprintln!("USAGE:");
+        eprintln!("  {bin_name} [OPTIONS] [-- CMD [ARGS...]]");
         eprintln!();
-        eprintln!("Arguments after '--' (or all positional args) replace the image CMD.");
+        eprintln!("OPTIONS:");
+        eprintln!("  -v, --volume HOST:GUEST[:ro]   Bind-mount a host path into the container.");
+        eprintln!("                                 Append :ro for a read-only mount. Repeatable.");
+        eprintln!("  -q, --quiet                    Suppress progress output.");
+        eprintln!("  -V, --version                  Print version and exit.");
+        eprintln!("  -h, --help                     Print this help and exit.");
+        eprintln!("  --                             Treat all following arguments as CMD.");
         eprintln!();
-        eprintln!("Environment:");
-        eprintln!("  BONK_BWRAP=<path>    Override the bwrap binary location");
+        eprintln!("ARGS:");
+        eprintln!("  CMD [ARGS...]   Command to run inside the container.");
+        eprintln!("                  Overrides the image's default CMD. Without --, the first");
+        eprintln!("                  unrecognised argument and everything after it becomes CMD.");
+        eprintln!();
+        eprintln!("ENVIRONMENT:");
+        eprintln!("  BONK_BWRAP=<path>   Override the embedded bwrap binary.");
+        eprintln!();
+        eprintln!("EXAMPLES:");
+        eprintln!("  {bin_name} echo hello");
+        eprintln!("  {bin_name} -v /data:/data -- python3 /data/script.py");
+        eprintln!("  {bin_name} -v /etc/passwd:/etc/passwd:ro id");
         std::process::exit(0);
     }
 
@@ -69,13 +91,6 @@ fn main() -> Result<()> {
         i += 1;
     }
 
-    log!(
-        quiet,
-        "bonk: quiet={quiet} volumes={} extra_args={:?} tty={stdin_is_tty}",
-        volumes.len(),
-        extra_args
-    );
-
     let exe_data = std::fs::read("/proc/self/exe").context("failed to read own binary")?;
     if exe_data.len() < FOOTER_SIZE {
         bail!("binary too small to contain bonk footer");
@@ -101,24 +116,17 @@ fn main() -> Result<()> {
         let _ = std::fs::remove_dir_all(&cache_dir);
         std::fs::create_dir_all(&rootfs_path).context("failed to create rootfs dir")?;
         let paths = extract_embedded_tools(&footer, &exe_data, &cache_dir)?;
-        log!(
-            quiet,
-            "bonk: extracting rootfs to {}",
-            rootfs_path.display()
-        );
+        log!(quiet, "bonk: [1/2] extracting rootfs...");
         mount::extract_rootfs(payload, &rootfs_path, paths.1.as_deref())?;
         std::fs::write(&marker, b"").context("failed to write marker")?;
+        log!(quiet, "bonk: [2/2] starting container");
         paths
     } else {
-        log!(
-            quiet,
-            "bonk: using cached rootfs at {}",
-            rootfs_path.display()
-        );
+        log!(quiet, "bonk: using cached rootfs");
+        log!(quiet, "bonk: starting container");
         extract_embedded_tools(&footer, &exe_data, &cache_dir)?
     };
 
-    // Task 7 — Launch
     let status = runtime::run(
         &rootfs_path,
         &config,

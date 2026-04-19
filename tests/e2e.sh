@@ -45,14 +45,14 @@ cargo build --release --quiet
 BONK="$REPO_ROOT/target/release/bonk"
 
 echo "==> Packing alpine:latest..."
-"$BONK" alpine:latest /tmp/bonk-e2e-alpine
+"$BONK" alpine:latest -o /tmp/bonk-e2e-alpine
 ALPINE=/tmp/bonk-e2e-alpine
 
 echo ""
 echo "Running tests..."
 
 # Basic command execution
-OUT=$("$ALPINE" echo "hello from a bonk container" 2>/dev/null)
+OUT=$("$ALPINE" echo "hello from a bonk container" 2>/dev/null) || true
 assert_contains "basic echo" "hello from a bonk container" "$OUT"
 
 # Quiet mode suppresses progress output on stderr
@@ -64,23 +64,23 @@ else
 fi
 
 # Piped stdin (TTY detection — must not crash)
-OUT=$(echo "piped-hello" | "$ALPINE" cat 2>/dev/null)
+OUT=$(echo "piped-hello" | "$ALPINE" cat 2>/dev/null) || true
 assert_contains "piped stdin" "piped-hello" "$OUT"
 
 # Volume mount (read-write)
 echo "volume-file-content" > /tmp/bonk-e2e-vol.txt
-OUT=$("$ALPINE" -v /tmp/bonk-e2e-vol.txt:/data/vol.txt cat /data/vol.txt 2>/dev/null)
+OUT=$("$ALPINE" -v /tmp/bonk-e2e-vol.txt:/data/vol.txt cat /data/vol.txt 2>/dev/null) || true
 assert_contains "volume mount" "volume-file-content" "$OUT"
 rm -f /tmp/bonk-e2e-vol.txt
 
 # Read-only volume mount
 echo "readonly-content" > /tmp/bonk-e2e-ro.txt
-OUT=$("$ALPINE" -v /tmp/bonk-e2e-ro.txt:/data/ro.txt:ro cat /data/ro.txt 2>/dev/null)
+OUT=$("$ALPINE" -v /tmp/bonk-e2e-ro.txt:/data/ro.txt:ro cat /data/ro.txt 2>/dev/null) || true
 assert_contains "read-only volume mount" "readonly-content" "$OUT"
 rm -f /tmp/bonk-e2e-ro.txt
 
 # Extra args replace CMD (entrypoint logic)
-OUT=$("$ALPINE" echo "replaced-cmd" 2>/dev/null)
+OUT=$("$ALPINE" echo "replaced-cmd" 2>/dev/null) || true
 assert_contains "extra args replace CMD" "replaced-cmd" "$OUT"
 
 # Exit code propagation
@@ -89,12 +89,12 @@ CODE=0
 assert_exit "exit code propagation" 42 "${CODE:-0}"
 
 # Second run uses cached rootfs (marker file present)
-OUT=$("$ALPINE" echo "cached" 2>&1)
+OUT=$("$ALPINE" echo "cached" 2>&1) || true
 assert_contains "cached run (log message)" "cached rootfs" "$OUT"
 
 # Root execution (sudo)
 if sudo -n true 2>/dev/null; then
-    OUT=$(sudo "$ALPINE" id 2>/dev/null)
+    OUT=$(sudo "$ALPINE" id 2>/dev/null) || true
     assert_contains "root execution (uid=0)" "uid=0" "$OUT"
 else
     echo "  SKIP: root execution (no passwordless sudo)"

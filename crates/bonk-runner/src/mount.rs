@@ -19,6 +19,8 @@ pub fn extract_rootfs(
         .arg("-d")
         .arg(dest)
         .arg(&payload_file)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .context("failed to execute unsquashfs")?;
     if !status.success() {

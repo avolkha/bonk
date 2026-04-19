@@ -42,4 +42,4 @@ jobs:
           tool: committed
 
       - name: Check commit messages
-        run: committed HEAD~${{ github.event.pull_request.commits }}..HEAD
+        run: committed ${{ github.event.pull_request.base.sha }}..HEAD

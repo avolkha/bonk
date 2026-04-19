@@ -179,9 +179,10 @@ pub fn get_runner_bytes(override_path: Option<&Path>) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::Mutex;
 
-    // NOTE: tests that mutate env vars (BONK_TOOLS_DIR) are not parallel-safe.
-    // Run the whole module with: cargo test -p bonk-cli -- pack::tests --test-threads=1
+    // Serialises tests that mutate BONK_TOOLS_DIR to avoid races with parallel test threads.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_override_path_resolves_correctly() {
@@ -211,6 +212,7 @@ mod tests {
 
     #[test]
     fn test_bonk_tools_dir_finds_binary() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("mytool"), b"tool bytes").unwrap();
         unsafe {
@@ -225,6 +227,7 @@ mod tests {
 
     #[test]
     fn test_bonk_tools_dir_set_but_file_absent_falls_through_to_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
         // Point BONK_TOOLS_DIR at an empty dir so step 1 misses,
         // then rely on step 5 (PATH) to find `cat`.
         let dir = tempfile::tempdir().unwrap();

@@ -1,5 +1,5 @@
-use anyhow::{bail, Context, Result};
-use bonk_common::{Footer, FOOTER_SIZE};
+use anyhow::{Context, Result, bail};
+use bonk_common::{FOOTER_SIZE, Footer};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -35,8 +35,7 @@ pub fn assemble(
     let runner = get_runner_bytes(None)?;
     let bwrap = get_tool_bytes("bwrap", bwrap_path)?;
     let unsquashfs = get_tool_bytes("unsquashfs", unsquashfs_path)?;
-    let config_json =
-        serde_json::to_vec(config).context("failed to serialize container config")?;
+    let config_json = serde_json::to_vec(config).context("failed to serialize container config")?;
 
     let mut output_file = std::fs::File::create(output).context("failed to create output file")?;
     let footer = write_sections(
@@ -84,13 +83,19 @@ fn write_sections(
     // Footer (bonk-common/src/lib.rs). Each field stores the size of the
     // section written immediately before it. Reordering writes here without
     // updating Footer — or vice versa — will corrupt every binary bonk produces.
-    let payload_offset    = write(runner,     "runner")?;
-    let payload_size      = write(payload,    "payload")?;
-    let bwrap_size        = write(bwrap,      "bwrap")?;
-    let unsquashfs_size   = write(unsquashfs, "unsquashfs")?;
-    let config_size       = write(config,     "config")?;
+    let payload_offset = write(runner, "runner")?;
+    let payload_size = write(payload, "payload")?;
+    let bwrap_size = write(bwrap, "bwrap")?;
+    let unsquashfs_size = write(unsquashfs, "unsquashfs")?;
+    let config_size = write(config, "config")?;
 
-    Ok(Footer { payload_offset, payload_size, bwrap_size, unsquashfs_size, config_size })
+    Ok(Footer {
+        payload_offset,
+        payload_size,
+        bwrap_size,
+        unsquashfs_size,
+        config_size,
+    })
 }
 
 /// Resolve the filesystem path of a tool binary by name.
@@ -153,7 +158,9 @@ pub fn get_tool_path(name: &str, override_path: Option<&Path>) -> Result<PathBuf
         "{} not found.\n\
          Set BONK_TOOLS_DIR=/path/to/dir, place it at tools/{}/{}\n\
          next to the bonk binary, or ensure it is on PATH.",
-        name, arch, name,
+        name,
+        arch,
+        name,
     );
 }
 
@@ -196,16 +203,23 @@ mod tests {
         let result = get_tool_path("bwrap", Some(Path::new("/nonexistent/path/to/bwrap")));
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
-        assert!(msg.contains("--bwrap-path"), "expected --bwrap-path in: {msg}");
+        assert!(
+            msg.contains("--bwrap-path"),
+            "expected --bwrap-path in: {msg}"
+        );
     }
 
     #[test]
     fn test_bonk_tools_dir_finds_binary() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("mytool"), b"tool bytes").unwrap();
-        unsafe { std::env::set_var("BONK_TOOLS_DIR", dir.path()); }
+        unsafe {
+            std::env::set_var("BONK_TOOLS_DIR", dir.path());
+        }
         let path = get_tool_path("mytool", None).unwrap();
-        unsafe { std::env::remove_var("BONK_TOOLS_DIR"); }
+        unsafe {
+            std::env::remove_var("BONK_TOOLS_DIR");
+        }
         assert_eq!(path, dir.path().join("mytool"));
     }
 
@@ -214,16 +228,22 @@ mod tests {
         // Point BONK_TOOLS_DIR at an empty dir so step 1 misses,
         // then rely on step 5 (PATH) to find `cat`.
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("BONK_TOOLS_DIR", dir.path()); }
+        unsafe {
+            std::env::set_var("BONK_TOOLS_DIR", dir.path());
+        }
         let path = get_tool_path("cat", None).unwrap();
-        unsafe { std::env::remove_var("BONK_TOOLS_DIR"); }
+        unsafe {
+            std::env::remove_var("BONK_TOOLS_DIR");
+        }
         assert!(path.exists());
     }
 
     #[test]
     fn test_path_search_finds_system_binary() {
         // `cat` is available on every Unix system.
-        unsafe { std::env::remove_var("BONK_TOOLS_DIR"); }
+        unsafe {
+            std::env::remove_var("BONK_TOOLS_DIR");
+        }
         let path = get_tool_path("cat", None).unwrap();
         assert!(path.exists());
     }
@@ -233,18 +253,25 @@ mod tests {
         // The test binary itself is a sibling of itself.
         let exe = std::env::current_exe().unwrap();
         let name = exe.file_name().unwrap().to_str().unwrap().to_string();
-        unsafe { std::env::remove_var("BONK_TOOLS_DIR"); }
+        unsafe {
+            std::env::remove_var("BONK_TOOLS_DIR");
+        }
         let path = get_tool_path(&name, None).unwrap();
         assert!(path.exists());
     }
 
     #[test]
     fn test_not_found_returns_helpful_error() {
-        unsafe { std::env::remove_var("BONK_TOOLS_DIR"); }
+        unsafe {
+            std::env::remove_var("BONK_TOOLS_DIR");
+        }
         let result = get_tool_path("bonk-nonexistent-tool-xyz-abc", None);
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
-        assert!(msg.contains("BONK_TOOLS_DIR"), "expected BONK_TOOLS_DIR in: {msg}");
+        assert!(
+            msg.contains("BONK_TOOLS_DIR"),
+            "expected BONK_TOOLS_DIR in: {msg}"
+        );
     }
 
     #[test]

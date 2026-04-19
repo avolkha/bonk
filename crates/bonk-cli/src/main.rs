@@ -1,13 +1,13 @@
-mod image;
 mod flatten;
+mod image;
 mod pack;
-use anyhow::{bail, Context, Result};
-use clap::Parser;
-use crate::image::export_image;
 use crate::flatten::flatten_layers;
-use crate::pack::build_squashfs;
+use crate::image::export_image;
 use crate::pack::assemble;
+use crate::pack::build_squashfs;
+use anyhow::{Context, Result, bail};
 use bonk_common::human_size;
+use clap::Parser;
 use std::path::Path;
 
 macro_rules! log {
@@ -26,7 +26,7 @@ macro_rules! log {
                   binary that runs the container using bubblewrap (bwrap) for sandboxing.\n\n\
                   Example:\n  bonk alpine:latest\n  ./alpine echo hello"
 )]
-pub struct Cli{
+pub struct Cli {
     // Docker image to squash (e.g. alpine:latest, ubuntu:22.04)
     image: String,
     // Output binary path (default: ./<image_name>)
@@ -43,7 +43,7 @@ pub struct Cli{
 }
 
 pub fn extract_binary_name(image: &str) -> Result<String> {
-    let name = image.split('/').last().unwrap_or(image);
+    let name = image.split('/').next_back().unwrap_or(image);
     Ok(name.split(':').next().unwrap_or(name).to_string())
 }
 
@@ -70,7 +70,7 @@ fn main() -> Result<()> {
     flatten_layers(&layer_paths, &rootfs_path).context("failed to flatten image layers")?;
     log!(cli.quiet, "Compressing rootfs with mksquashfs... ");
     let payload = build_squashfs(&rootfs_path).context("failed to build squashfs")?;
-    
+
     log!(cli.quiet, "Assembling binary... ");
     let total = assemble(
         &output,
@@ -78,7 +78,8 @@ fn main() -> Result<()> {
         &config,
         cli.bwrap_path.as_deref().map(Path::new),
         cli.unsquashfs_path.as_deref().map(Path::new),
-    ).context("failed to assemble binary")?;
+    )
+    .context("failed to assemble binary")?;
     log!(cli.quiet, "bonk: wrote {} ({})", output, human_size(total));
 
     Ok(())
@@ -91,13 +92,17 @@ mod tests {
     #[test]
     fn test_extract_binary_name() {
         let cases = [
-            ("alpine:latest",       "alpine"),
-            ("ubuntu:22.04",        "ubuntu"),
-            ("myrepo/myimage:1.0",  "myimage"),
-            ("myimage",             "myimage"),
+            ("alpine:latest", "alpine"),
+            ("ubuntu:22.04", "ubuntu"),
+            ("myrepo/myimage:1.0", "myimage"),
+            ("myimage", "myimage"),
         ];
         for (input, expected) in cases {
-            assert_eq!(extract_binary_name(input).unwrap(), expected, "input: {input}");
+            assert_eq!(
+                extract_binary_name(input).unwrap(),
+                expected,
+                "input: {input}"
+            );
         }
     }
 }

@@ -1,5 +1,4 @@
-use anyhow::{bail, Context, Result};
-
+use anyhow::{Context, Result, bail};
 
 pub struct VolumeMount {
     pub host: String,
@@ -14,11 +13,18 @@ impl VolumeMount {
         let host = parts.first().copied().unwrap_or("").to_string();
         let guest = parts.get(1).copied().unwrap_or("").to_string();
         let read_only = parts.get(2).copied() == Some("ro");
-        VolumeMount { host, guest, read_only }
+        VolumeMount {
+            host,
+            guest,
+            read_only,
+        }
     }
 }
 
-fn resolve_cmd(config: &bonk_common::ContainerConfig, extra_args: &[String]) -> Result<Vec<String>> {
+fn resolve_cmd(
+    config: &bonk_common::ContainerConfig,
+    extra_args: &[String],
+) -> Result<Vec<String>> {
     if !extra_args.is_empty() {
         Ok(extra_args.to_vec())
     } else if !config.entrypoint.is_empty() && !config.cmd.is_empty() {
@@ -48,12 +54,19 @@ pub fn run(
             if let Ok(p) = std::env::var("BONK_BWRAP") {
                 std::path::PathBuf::from(p)
             } else {
-                which::which("bwrap").ok().context("failed to find bwrap in PATH")?
+                which::which("bwrap")
+                    .ok()
+                    .context("failed to find bwrap in PATH")?
             }
         }
     };
     let bwrap_supports_overlay = std::process::Command::new(&bwrap_bin)
-        .arg("--overlay-src").arg("/").arg("--tmp-overlay").arg("/").arg("--").arg("true")
+        .arg("--overlay-src")
+        .arg("/")
+        .arg("--tmp-overlay")
+        .arg("/")
+        .arg("--")
+        .arg("true")
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
@@ -62,7 +75,10 @@ pub fn run(
     }
     let mut cmd = std::process::Command::new(bwrap_bin);
     if bwrap_supports_overlay {
-        cmd.arg("--overlay-src").arg(rootfs).arg("--tmp-overlay").arg("/");
+        cmd.arg("--overlay-src")
+            .arg(rootfs)
+            .arg("--tmp-overlay")
+            .arg("/");
     } else {
         cmd.arg("--bind").arg(rootfs).arg("/");
     }
@@ -71,18 +87,22 @@ pub fn run(
     cmd.arg("--tmpfs").arg("/tmp");
     cmd.arg("--tmpfs").arg("/run");
     cmd.arg("--hostname").arg("bonk");
-    cmd.arg("--ro-bind").arg("/etc/resolv.conf").arg("/etc/resolv.conf");
+    cmd.arg("--ro-bind")
+        .arg("/etc/resolv.conf")
+        .arg("/etc/resolv.conf");
 
     if unsafe { libc::getuid() } == 0 {
         cmd.arg("--unshare-ipc")
-           .arg("--unshare-pid")
-           .arg("--unshare-uts")
-           .arg("--unshare-cgroup");
+            .arg("--unshare-pid")
+            .arg("--unshare-uts")
+            .arg("--unshare-cgroup");
     } else {
         cmd.arg("--unshare-all")
-           .arg("--share-net")
-           .arg("--uid").arg("0")
-           .arg("--gid").arg("0");
+            .arg("--share-net")
+            .arg("--uid")
+            .arg("0")
+            .arg("--gid")
+            .arg("0");
     }
 
     for vol in volumes {
@@ -109,7 +129,6 @@ pub fn run(
     cmd.arg("--chdir").arg(&config.working_dir);
     cmd.arg("--").args(resolve_cmd(config, extra_args)?);
     cmd.status().context("failed to execute bwrap")
-
 }
 
 #[cfg(test)]
@@ -167,8 +186,10 @@ mod tests {
 
     fn assert_contains_sequence(args: &[String], expected: &[&str]) {
         assert!(
-            args.windows(expected.len())
-                .any(|window| window.iter().map(String::as_str).eq(expected.iter().copied())),
+            args.windows(expected.len()).any(|window| window
+                .iter()
+                .map(String::as_str)
+                .eq(expected.iter().copied())),
             "expected sequence {:?} in {:?}",
             expected,
             args
@@ -239,7 +260,12 @@ mod tests {
         let args = read_args(&log_path);
         assert_contains_sequence(
             &args,
-            &["--overlay-src", rootfs.to_str().unwrap(), "--tmp-overlay", "/"],
+            &[
+                "--overlay-src",
+                rootfs.to_str().unwrap(),
+                "--tmp-overlay",
+                "/",
+            ],
         );
         assert_contains_sequence(&args, &["--ro-bind", "/tmp/host", "/guest"]);
         assert_contains_sequence(&args, &["--setenv", "KEY", "value"]);

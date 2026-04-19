@@ -1,8 +1,8 @@
+use anyhow::{Context, Result};
+use flate2::read::GzDecoder;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use anyhow::{Context, Result};
-use flate2::read::GzDecoder;
 
 /// Safely joins `rootfs` with a path from a tar entry, normalizing away any
 /// `..`, absolute, or prefix components that would escape the rootfs.
@@ -23,10 +23,9 @@ fn safe_join(rootfs: &Path, tar_path: &Path) -> Option<PathBuf> {
 /// Returns `Ok(canonical)` if safe, or `Err` if the path escapes or can't be
 /// resolved. Both `rootfs` and `target` must exist when this is called.
 fn verify_inside_rootfs(rootfs: &Path, target: &Path) -> Result<PathBuf> {
-    let canonical_root = std::fs::canonicalize(rootfs)
-        .context("failed to canonicalize rootfs")?;
-    let canonical_target = std::fs::canonicalize(target)
-        .context("failed to canonicalize target")?;
+    let canonical_root = std::fs::canonicalize(rootfs).context("failed to canonicalize rootfs")?;
+    let canonical_target =
+        std::fs::canonicalize(target).context("failed to canonicalize target")?;
     if canonical_target.starts_with(&canonical_root) {
         Ok(canonical_target)
     } else {
@@ -39,9 +38,11 @@ fn verify_inside_rootfs(rootfs: &Path, target: &Path) -> Result<PathBuf> {
 }
 
 fn determine_file_format(path: &Path) -> Result<&'static str> {
-    let mut file = std::fs::File::open(path).context("failed to open layer file for format detection")?;
+    let mut file =
+        std::fs::File::open(path).context("failed to open layer file for format detection")?;
     let mut buf = [0u8; 2];
-    file.read_exact(&mut buf).context("failed to read layer file")?;
+    file.read_exact(&mut buf)
+        .context("failed to read layer file")?;
     match &buf {
         [0x1F, 0x8B] => Ok("gzip"),
         [0x28, 0xB5] => Ok("zstd"),
@@ -52,7 +53,7 @@ fn determine_file_format(path: &Path) -> Result<&'static str> {
 fn open_layer(path: &Path) -> Result<Box<dyn Read>> {
     let file = File::open(path).context("failed to open layer file")?;
     let file_format = determine_file_format(path)?;
-    let reader: Box<dyn Read> =  match file_format {
+    let reader: Box<dyn Read> = match file_format {
         "gzip" => Box::new(GzDecoder::new(file)),
         "zstd" => Box::new(zstd::Decoder::new(file).context("failed to create zstd decoder")?),
         "raw" => Box::new(file),
@@ -60,7 +61,6 @@ fn open_layer(path: &Path) -> Result<Box<dyn Read>> {
     };
     Ok(reader)
 }
-
 
 /// Handles an opaque whiteout (`.wh..wh..opq`): removes all contents of the
 /// corresponding directory in `rootfs` but keeps the directory itself, so that
@@ -70,14 +70,21 @@ fn apply_opaque_whiteout(rootfs: &Path, whiteout_path: &Path) -> Result<()> {
     let dir = match safe_join(rootfs, parent) {
         Some(p) => p,
         None => {
-            eprintln!("warning: skipping unsafe opaque whiteout path: {}", whiteout_path.display());
+            eprintln!(
+                "warning: skipping unsafe opaque whiteout path: {}",
+                whiteout_path.display()
+            );
             return Ok(());
         }
     };
     if dir.exists() {
         // Verify the directory itself is inside rootfs (could follow a symlink)
         if let Err(e) = verify_inside_rootfs(rootfs, &dir) {
-            eprintln!("warning: skipping opaque whiteout ({}): {}", whiteout_path.display(), e);
+            eprintln!(
+                "warning: skipping opaque whiteout ({}): {}",
+                whiteout_path.display(),
+                e
+            );
             return Ok(());
         }
         for entry in std::fs::read_dir(&dir).context("failed to read dir for opaque whiteout")? {
@@ -86,11 +93,15 @@ fn apply_opaque_whiteout(rootfs: &Path, whiteout_path: &Path) -> Result<()> {
             // Each child is already under a verified dir, but double-check
             // in case of symlink tricks within the directory
             if verify_inside_rootfs(rootfs, &child).is_err() {
-                eprintln!("warning: skipping opaque whiteout child outside rootfs: {}", child.display());
+                eprintln!(
+                    "warning: skipping opaque whiteout child outside rootfs: {}",
+                    child.display()
+                );
                 continue;
             }
             if child.is_dir() {
-                std::fs::remove_dir_all(&child).context("failed to remove subdir in opaque whiteout")?;
+                std::fs::remove_dir_all(&child)
+                    .context("failed to remove subdir in opaque whiteout")?;
             } else {
                 std::fs::remove_file(&child).context("failed to remove file in opaque whiteout")?;
             }
@@ -110,13 +121,19 @@ fn apply_regular_whiteout(rootfs: &Path, whiteout_path: &Path) -> Result<()> {
     let real_name = filename.strip_prefix(".wh.").unwrap_or(filename);
     // Reject if real_name is ".." or empty (prevents escaping via .wh... entries)
     if real_name == ".." || real_name == "." || real_name.is_empty() {
-        eprintln!("warning: skipping whiteout with invalid name: {}", whiteout_path.display());
+        eprintln!(
+            "warning: skipping whiteout with invalid name: {}",
+            whiteout_path.display()
+        );
         return Ok(());
     }
     let base = match safe_join(rootfs, parent) {
         Some(p) => p,
         None => {
-            eprintln!("warning: skipping unsafe whiteout path: {}", whiteout_path.display());
+            eprintln!(
+                "warning: skipping unsafe whiteout path: {}",
+                whiteout_path.display()
+            );
             return Ok(());
         }
     };
@@ -124,7 +141,11 @@ fn apply_regular_whiteout(rootfs: &Path, whiteout_path: &Path) -> Result<()> {
     if target.exists() {
         // Verify the resolved path is inside rootfs (catches symlink escapes)
         if let Err(e) = verify_inside_rootfs(rootfs, &target) {
-            eprintln!("warning: skipping whiteout ({}): {}", whiteout_path.display(), e);
+            eprintln!(
+                "warning: skipping whiteout ({}): {}",
+                whiteout_path.display(),
+                e
+            );
             return Ok(());
         }
         if target.is_dir() {
@@ -138,9 +159,15 @@ fn apply_regular_whiteout(rootfs: &Path, whiteout_path: &Path) -> Result<()> {
 
 fn apply_layer(layer_tar: Box<dyn Read>, rootfs: &Path) -> Result<()> {
     let mut archive = tar::Archive::new(layer_tar);
-    for entry in archive.entries().context("failed to read layer tar entries")? {
+    for entry in archive
+        .entries()
+        .context("failed to read layer tar entries")?
+    {
         let mut entry = entry.context("failed to read layer tar entry")?;
-        let path = entry.path().context("failed to get layer tar entry path")?.into_owned();
+        let path = entry
+            .path()
+            .context("failed to get layer tar entry path")?
+            .into_owned();
         let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
         if filename == ".wh..wh..opq" {
             apply_opaque_whiteout(rootfs, &path)?;
@@ -159,8 +186,8 @@ pub fn flatten_layers(layers: &[PathBuf], rootfs: &Path) -> Result<()> {
     std::fs::create_dir_all(rootfs).context("failed to create rootfs directory")?;
     for layer in layers {
         let reader = open_layer(layer)?;
-        apply_layer(reader, rootfs).context(format!("failed to apply layer: {}", layer.display()))?;
-
+        apply_layer(reader, rootfs)
+            .context(format!("failed to apply layer: {}", layer.display()))?;
     }
     Ok(())
 }
@@ -183,7 +210,10 @@ mod tests {
 
         apply_regular_whiteout(&rootfs, Path::new(".wh...")).unwrap();
 
-        assert!(sentinel.exists(), ".. injection must not delete files outside rootfs");
+        assert!(
+            sentinel.exists(),
+            ".. injection must not delete files outside rootfs"
+        );
     }
 
     #[test]
@@ -200,7 +230,10 @@ mod tests {
         // Whiteout trying to delete through the symlink
         apply_regular_whiteout(rootfs.path(), Path::new("escape/.wh.secret")).unwrap();
 
-        assert!(victim.exists(), "symlink escape must not delete files outside rootfs");
+        assert!(
+            victim.exists(),
+            "symlink escape must not delete files outside rootfs"
+        );
     }
 
     #[test]
@@ -216,7 +249,10 @@ mod tests {
 
         apply_opaque_whiteout(rootfs.path(), Path::new("escape/.wh..wh..opq")).unwrap();
 
-        assert!(victim.exists(), "symlink-based opaque whiteout must not delete outside rootfs");
+        assert!(
+            victim.exists(),
+            "symlink-based opaque whiteout must not delete outside rootfs"
+        );
     }
 
     #[test]
@@ -230,7 +266,10 @@ mod tests {
         // A crafted tar path that tries to escape via ..
         apply_regular_whiteout(rootfs.path(), Path::new("../../sensitive")).unwrap();
 
-        assert!(victim.exists(), "path traversal should not delete files outside rootfs");
+        assert!(
+            victim.exists(),
+            "path traversal should not delete files outside rootfs"
+        );
     }
 
     #[test]
@@ -242,7 +281,10 @@ mod tests {
 
         apply_opaque_whiteout(rootfs.path(), Path::new("../../.wh..wh..opq")).unwrap();
 
-        assert!(victim.exists(), "path traversal should not affect files outside rootfs");
+        assert!(
+            victim.exists(),
+            "path traversal should not affect files outside rootfs"
+        );
     }
 
     #[test]
@@ -290,7 +332,11 @@ mod tests {
         // Directory itself must still exist
         assert!(dir.exists(), "directory itself should be kept");
         // But all contents removed
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "directory should be empty");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "directory should be empty"
+        );
     }
 
     #[test]
@@ -353,8 +399,8 @@ mod tests {
 
     #[test]
     fn test_open_layer_gzip() {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
         let mut enc = GzEncoder::new(Vec::new(), Compression::default());
         enc.write_all(b"hello gzip").unwrap();
         let compressed = enc.finish().unwrap();

@@ -1,41 +1,37 @@
-
 pub const FOOTER_MAGIC: u64 = 0xB04B_B04B_B04B_0002;
 
 pub const FOOTER_SIZE: usize = 56; // 7 × u64
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ContainerConfig {
-
     pub entrypoint: Vec<String>,
     pub cmd: Vec<String>,
     pub env: Vec<String>,
     pub working_dir: String,
-    pub user: Option<String>
-
-
+    pub user: Option<String>,
 }
 
-impl Default for ContainerConfig{
+impl Default for ContainerConfig {
     fn default() -> Self {
         Self {
             entrypoint: vec![],
             cmd: vec![],
             env: vec![],
             working_dir: "/".to_string(),
-            user: None
+            user: None,
         }
     }
 }
 
-pub struct Footer{
+pub struct Footer {
     pub payload_offset: u64,
     pub payload_size: u64,
     pub config_size: u64,
     pub bwrap_size: u64,
-    pub unsquashfs_size: u64
+    pub unsquashfs_size: u64,
 }
 
-impl Footer{
+impl Footer {
     /// Returns `true` if both `bwrap_size` and `unsquashfs_size` are nonzero.
     ///
     /// # Examples
@@ -109,7 +105,6 @@ pub fn human_size(bytes: usize) -> String {
     }
     format!("{:.1} {}", size, unit)
 }
-
 
 #[cfg(test)]
 mod tests {

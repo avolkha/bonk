@@ -1,5 +1,4 @@
-
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use bonk_common::ContainerConfig;
 use serde::Deserialize;
 use std::env;
@@ -7,7 +6,6 @@ use std::path::{Path, PathBuf};
 use tar::Archive;
 
 /// Image export and parsing logic.
-
 /// Parses the `DOCKER` environment variable into a program name and prefix args.
 /// Falls back to `"docker"` with no prefix args if the variable is not set.
 fn parse_docker_cmd(docker_cmd: &str) -> (&str, Vec<&str>) {
@@ -43,14 +41,16 @@ pub fn export_image(image: &str, workdir: &Path) -> Result<PathBuf> {
     }
     let file = std::fs::File::open(&output).context("failed to open exported image tarball")?;
     let mut archive = Archive::new(file);
-    archive.unpack(&image_output_dir).context("failed to unpack image tarball")?;  
+    archive
+        .unpack(&image_output_dir)
+        .context("failed to unpack image tarball")?;
     std::fs::remove_file(&output).context("failed to remove image tarball")?;
     Ok(image_output_dir)
 }
 
 /// Image manifest parsing and layer flattening logic.
 /// TODO: move this to a separate module for better organization.
-/// 
+///
 
 #[derive(Deserialize)]
 struct DockerManifest {
@@ -83,20 +83,28 @@ struct DockerContainerConfig {
 pub fn parse_image(image_dir: &Path) -> Result<(ContainerConfig, Vec<PathBuf>)> {
     let manifest_path = image_dir.join("manifest.json");
     let manifest_data = std::fs::read(&manifest_path).context("failed to read manifest.json")?;
-    let manifest: Vec<DockerManifest> = serde_json::from_slice(&manifest_data).context("failed to parse manifest.json")?;
+    let manifest: Vec<DockerManifest> =
+        serde_json::from_slice(&manifest_data).context("failed to parse manifest.json")?;
     if manifest.len() != 1 {
-        bail!("expected exactly 1 image in manifest.json, found {}", manifest.len());
+        bail!(
+            "expected exactly 1 image in manifest.json, found {}",
+            manifest.len()
+        );
     }
     let manifest = manifest.into_iter().next().unwrap();
     let config_path = image_dir.join(&manifest.config);
     let config_data = std::fs::read(&config_path).context("failed to read config file")?;
-    let config: DockerImageConfig = serde_json::from_slice(&config_data).context("failed to parse config file")?;
+    let config: DockerImageConfig =
+        serde_json::from_slice(&config_data).context("failed to parse config file")?;
     let container_config = match config.config {
         Some(c) => ContainerConfig {
             entrypoint: c.entrypoint.unwrap_or_default(),
             cmd: c.cmd.unwrap_or_default(),
             env: c.env.unwrap_or_else(|| ContainerConfig::default().env),
-            working_dir: c.working_dir.filter(|s| !s.is_empty()).unwrap_or_else(|| "/".to_string()),
+            working_dir: c
+                .working_dir
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "/".to_string()),
             user: c.user.filter(|s| !s.is_empty()),
         },
         None => ContainerConfig::default(),

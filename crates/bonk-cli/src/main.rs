@@ -21,20 +21,36 @@ macro_rules! log {
 #[derive(Debug, Clone, clap::Parser)]
 #[command(
     name = "bonk",
-    about = "Squash a Docker image into a standalone executable",
-    long_about = "bonk takes a Docker image and produces a single self-contained Linux \
-                  binary that runs the container using bubblewrap (bwrap) for sandboxing.\n\n\
-                  Example:\n  bonk alpine:latest\n  ./alpine echo hello"
+    version = env!("CARGO_PKG_VERSION"),
+    about = "Smash a Docker image into a single self-contained executable",
+    long_about = "bonk exports a Docker image, flattens its layers into a SquashFS rootfs,
+and assembles a single static binary that runs the container via bwrap.
+The output binary has zero runtime dependencies on the target machine.
+
+EXAMPLES:
+  bonk alpine:latest
+  ./alpine echo \"ooga booga\"
+
+  bonk python:3.12-slim -o python3
+  scp python3 someserver:
+  ssh someserver ./python3 -c \"print('hello')\"",
+    after_help = "Both `bonk` and `bonk-runner` must be on PATH or in the same directory."
 )]
 pub struct Cli {
-    // Docker image to squash (e.g. alpine:latest, ubuntu:22.04)
+    /// Docker image to pack (e.g. alpine:latest, ubuntu:22.04, myrepo/myimage:1.0)
+    #[arg(value_name = "IMAGE")]
     image: String,
-    // Output binary path (default: ./<image_name>)
+
+    /// Output binary path [default: ./<image-name>]
+    #[arg(short, long, value_name = "FILE")]
     output: Option<String>,
 
-    // Path to a static bwrap binary to embed (overrides automatic search)
+    /// Path to a static bwrap binary to embed [default: search PATH]
+    #[arg(long, value_name = "PATH")]
     bwrap_path: Option<String>,
-    // Path to a static unsquashfs binary to embed (overrides automatic search)
+
+    /// Path to a static unsquashfs binary to embed [default: search PATH]
+    #[arg(long, value_name = "PATH")]
     unsquashfs_path: Option<String>,
 
     /// Suppress progress output
@@ -59,19 +75,17 @@ fn main() -> Result<()> {
     }
     let tempdir = tempfile::tempdir().context("failed to create temp directory")?;
 
-    log!(cli.quiet, "Image: {}", cli.image);
-    log!(cli.quiet, "Output: {}", output);
-    log!(cli.quiet, "Exporting image {}... ", cli.image);
+    log!(cli.quiet, "bonk: packing {} → {}", cli.image, output);
+    log!(cli.quiet, "bonk: [1/5] exporting image...");
     let image_dir = export_image(&cli.image, tempdir.path()).context("failed to export image")?;
-    log!(cli.quiet, "Parsing image manifest... ");
+    log!(cli.quiet, "bonk: [2/5] parsing manifest...");
     let (config, layer_paths) = image::parse_image(&image_dir)?;
-    log!(cli.quiet, "Flattening image layers... ");
+    log!(cli.quiet, "bonk: [3/5] flattening {} layer(s)...", layer_paths.len());
     let rootfs_path = tempdir.path().join("rootfs");
     flatten_layers(&layer_paths, &rootfs_path).context("failed to flatten image layers")?;
-    log!(cli.quiet, "Compressing rootfs with mksquashfs... ");
+    log!(cli.quiet, "bonk: [4/5] compressing rootfs...");
     let payload = build_squashfs(&rootfs_path).context("failed to build squashfs")?;
-
-    log!(cli.quiet, "Assembling binary... ");
+    log!(cli.quiet, "bonk: [5/5] assembling binary...");
     let total = assemble(
         &output,
         &payload,
@@ -80,7 +94,7 @@ fn main() -> Result<()> {
         cli.unsquashfs_path.as_deref().map(Path::new),
     )
     .context("failed to assemble binary")?;
-    log!(cli.quiet, "bonk: wrote {} ({})", output, human_size(total));
+    log!(cli.quiet, "bonk: done — wrote {} ({})", output, human_size(total));
 
     Ok(())
 }

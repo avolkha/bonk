@@ -1,4 +1,4 @@
-name: Rust Quality Checks
+name: Quality Checks
 
 on:
   push:
@@ -42,4 +42,4 @@ jobs:
           tool: committed
 
       - name: Check commit messages
-        run: committed ${{ github.event.pull_request.base.sha }}..HEAD
+        run: committed ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}

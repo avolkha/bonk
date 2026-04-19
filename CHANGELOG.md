@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `bonk --help` long description now renders correctly (was broken across lines)
+- `bonk-runner` progress output uses step numbers `[1/2]` / `[2/2]` matching `bonk`'s style
+- `bonk-runner` no longer leaks internal cache paths in progress messages
+
 ## [0.1.0] - 2026-04-19
 
 ### Added

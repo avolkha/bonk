@@ -33,12 +33,18 @@ assert_exit() {
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+echo "==> Checking prerequisites..."
+if ! docker info >/dev/null 2>&1; then
+    echo "ERROR: cannot reach Docker daemon (is it running? is the user in the docker group?)"
+    exit 1
+fi
+
 echo "==> Building release binaries..."
 cargo build --release --quiet
 cp target/release/bonk target/release/bonk-runner ~/.cargo/bin/
 
 echo "==> Packing alpine:latest..."
-bonk alpine:latest /tmp/bonk-e2e-alpine 2>/dev/null
+bonk alpine:latest /tmp/bonk-e2e-alpine
 ALPINE=/tmp/bonk-e2e-alpine
 
 echo ""

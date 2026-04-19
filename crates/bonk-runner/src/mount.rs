@@ -32,12 +32,12 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
-    fn write_fake_unsquashfs(script_body: &str) -> tempfile::NamedTempFile {
-        let script = tempfile::NamedTempFile::new().unwrap();
-        fs::write(script.path(), format!("#!/bin/sh\nset -eu\n{script_body}\n")).unwrap();
-        let mut perms = fs::metadata(script.path()).unwrap().permissions();
+    fn write_fake_unsquashfs(dir: &std::path::Path, script_body: &str) -> std::path::PathBuf {
+        let script = dir.join("fake-unsquashfs.sh");
+        fs::write(&script, format!("#!/bin/sh\nset -eu\n{script_body}\n")).unwrap();
+        let mut perms = fs::metadata(&script).unwrap().permissions();
         perms.set_mode(0o755);
-        fs::set_permissions(script.path(), perms).unwrap();
+        fs::set_permissions(&script, perms).unwrap();
         script
     }
 
@@ -45,6 +45,7 @@ mod tests {
     fn test_extract_rootfs_runs_unsquashfs_and_cleans_up_payload_file() {
         let tempdir = tempfile::tempdir().unwrap();
         let script = write_fake_unsquashfs(
+            tempdir.path(),
             "test \"$1\" = \"-f\"\n\
              test \"$2\" = \"-d\"\n\
              dest=\"$3\"\n\
@@ -54,7 +55,7 @@ mod tests {
              exit 0",
         );
 
-        extract_rootfs(b"payload-bytes", tempdir.path(), Some(script.path())).unwrap();
+        extract_rootfs(b"payload-bytes", tempdir.path(), Some(&script)).unwrap();
 
         assert_eq!(fs::read(tempdir.path().join("rootfs.txt")).unwrap(), b"extracted");
         assert!(!tempdir.path().join("payload.sqfs").exists());
@@ -63,9 +64,9 @@ mod tests {
     #[test]
     fn test_extract_rootfs_returns_error_when_unsquashfs_fails() {
         let tempdir = tempfile::tempdir().unwrap();
-        let script = write_fake_unsquashfs("exit 9");
+        let script = write_fake_unsquashfs(tempdir.path(), "exit 9");
 
-        let error = extract_rootfs(b"payload-bytes", tempdir.path(), Some(script.path())).unwrap_err();
+        let error = extract_rootfs(b"payload-bytes", tempdir.path(), Some(&script)).unwrap_err();
 
         assert!(format!("{error:#}").contains("unsquashfs failed with status"));
         assert!(tempdir.path().join("payload.sqfs").exists());

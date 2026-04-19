@@ -102,6 +102,7 @@ dependencies = [
  "bonk-common",
  "libc",
  "serde_json",
+ "tempfile",
  "which 1.0.5",
 ]
 

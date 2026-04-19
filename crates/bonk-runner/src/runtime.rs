@@ -129,11 +129,16 @@ mod tests {
         }
     }
 
-    fn write_fake_bwrap(log_path: &Path, overlay_probe_success: bool, exit_code: i32) -> tempfile::NamedTempFile {
-        let script = tempfile::NamedTempFile::new().unwrap();
+    fn write_fake_bwrap(
+        dir: &Path,
+        log_path: &Path,
+        overlay_probe_success: bool,
+        exit_code: i32,
+    ) -> std::path::PathBuf {
+        let script = dir.join("fake-bwrap.sh");
         let probe_exit = if overlay_probe_success { 0 } else { 1 };
         fs::write(
-            script.path(),
+            &script,
             format!(
                 "#!/bin/sh\n\
                  set -eu\n\
@@ -146,9 +151,9 @@ mod tests {
             ),
         )
         .unwrap();
-        let mut perms = fs::metadata(script.path()).unwrap().permissions();
+        let mut perms = fs::metadata(&script).unwrap().permissions();
         perms.set_mode(0o755);
-        fs::set_permissions(script.path(), perms).unwrap();
+        fs::set_permissions(&script, perms).unwrap();
         script
     }
 
@@ -214,7 +219,7 @@ mod tests {
     fn test_run_uses_overlay_and_passes_expected_arguments() {
         let tempdir = tempfile::tempdir().unwrap();
         let log_path = tempdir.path().join("args.log");
-        let bwrap = write_fake_bwrap(&log_path, true, 7);
+        let bwrap = write_fake_bwrap(tempdir.path(), &log_path, true, 7);
         let rootfs = tempdir.path().join("rootfs");
         fs::create_dir_all(&rootfs).unwrap();
         let volumes = vec![VolumeMount::parse("/tmp/host:/guest:ro")];
@@ -224,7 +229,7 @@ mod tests {
             &make_config(),
             &["echo".into(), "hi".into()],
             &volumes,
-            Some(bwrap.path()),
+            Some(&bwrap),
             true,
         )
         .unwrap();
@@ -247,7 +252,7 @@ mod tests {
     fn test_run_falls_back_to_bind_mount_when_overlay_probe_fails() {
         let tempdir = tempfile::tempdir().unwrap();
         let log_path = tempdir.path().join("args.log");
-        let bwrap = write_fake_bwrap(&log_path, false, 0);
+        let bwrap = write_fake_bwrap(tempdir.path(), &log_path, false, 0);
         let rootfs = tempdir.path().join("rootfs");
         fs::create_dir_all(&rootfs).unwrap();
 
@@ -259,7 +264,7 @@ mod tests {
             },
             &[],
             &[],
-            Some(bwrap.path()),
+            Some(&bwrap),
             false,
         )
         .unwrap();

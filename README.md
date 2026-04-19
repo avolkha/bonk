@@ -54,6 +54,32 @@ At runtime:
 
 ## Install
 
+### Download a release (recommended)
+
+Pre-built static binaries are available for every [GitHub Release](https://github.com/avolkha/bonk/releases).
+
+**x86_64 (Linux)**
+```bash
+VERSION=v0.1.0
+curl -fsSL https://github.com/avolkha/bonk/releases/download/${VERSION}/bonk-x86_64-unknown-linux-musl -o bonk
+curl -fsSL https://github.com/avolkha/bonk/releases/download/${VERSION}/bonk-runner-x86_64-unknown-linux-musl -o bonk-runner
+chmod +x bonk bonk-runner
+sudo mv bonk bonk-runner /usr/local/bin/
+```
+
+**ARM64 (Linux)**
+```bash
+VERSION=v0.1.0
+curl -fsSL https://github.com/avolkha/bonk/releases/download/${VERSION}/bonk-aarch64-unknown-linux-musl -o bonk
+curl -fsSL https://github.com/avolkha/bonk/releases/download/${VERSION}/bonk-runner-aarch64-unknown-linux-musl -o bonk-runner
+chmod +x bonk bonk-runner
+sudo mv bonk bonk-runner /usr/local/bin/
+```
+
+Both binaries are fully static (musl) — no runtime dependencies on the target machine.
+
+### Build from source
+
 ```bash
 cargo build --release
 cp target/release/bonk target/release/bonk-runner ~/.cargo/bin/

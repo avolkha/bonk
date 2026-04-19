@@ -45,7 +45,7 @@ cargo build --release --quiet
 BONK="$REPO_ROOT/target/release/bonk"
 
 echo "==> Packing alpine:latest..."
-"$BONK" alpine:latest /tmp/bonk-e2e-alpine
+"$BONK" alpine:latest -o /tmp/bonk-e2e-alpine
 ALPINE=/tmp/bonk-e2e-alpine
 
 echo ""

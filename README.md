@@ -234,4 +234,4 @@ This repo is structured as a guided Rust curriculum. Each lesson introduces lang
 
 ## License
 
-MIT
+Apache License 2.0 — see [LICENSE](LICENSE) for details.

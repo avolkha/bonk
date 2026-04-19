@@ -10,7 +10,9 @@ pub fn extract_rootfs(
     std::fs::write(&payload_file, payload).context("failed to write payload")?;
     let unsquashfs_bin = match unsquashfs {
         Some(path) => path.to_path_buf(),
-        None => which("unsquashfs").ok().context("failed to find unsquashfs in PATH")?,
+        None => which("unsquashfs")
+            .ok()
+            .context("failed to find unsquashfs in PATH")?,
     };
     let status = std::process::Command::new(unsquashfs_bin)
         .arg("-f")
@@ -57,7 +59,10 @@ mod tests {
 
         extract_rootfs(b"payload-bytes", tempdir.path(), Some(&script)).unwrap();
 
-        assert_eq!(fs::read(tempdir.path().join("rootfs.txt")).unwrap(), b"extracted");
+        assert_eq!(
+            fs::read(tempdir.path().join("rootfs.txt")).unwrap(),
+            b"extracted"
+        );
         assert!(!tempdir.path().join("payload.sqfs").exists());
     }
 

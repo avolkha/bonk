@@ -52,7 +52,7 @@ echo ""
 echo "Running tests..."
 
 # Basic command execution
-OUT=$("$ALPINE" echo "hello from a bonk container" 2>&1) || true
+OUT=$("$ALPINE" echo "hello from a bonk container" 2>/dev/null) || true
 assert_contains "basic echo" "hello from a bonk container" "$OUT"
 
 # Quiet mode suppresses progress output on stderr

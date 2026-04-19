@@ -232,6 +232,19 @@ This repo is structured as a guided Rust curriculum. Each lesson introduces lang
 
 ---
 
+## Development
+
+Commits follow the [Conventional Commits](https://www.conventionalcommits.org/) spec. This drives the changelog and version bumps:
+
+| Prefix | Effect |
+|---|---|
+| `fix:` | patch release |
+| `feat:` | minor release |
+| `feat!:` / `BREAKING CHANGE:` | major release |
+| `chore:`, `docs:`, `style:`, `test:` | no release |
+
+---
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE) for details.

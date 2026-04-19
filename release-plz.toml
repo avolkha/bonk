@@ -1,0 +1,23 @@
+[workspace]
+# Don't publish to crates.io — bonk is a binary tool distributed via GitHub Releases
+publish = false
+
+# release-plz creates the git tag on Release PR merge,
+# which triggers release.yml to build and publish the static binaries.
+git_release_enable = true
+
+[[package]]
+name = "bonk-cli"
+changelog_path = "../../CHANGELOG.md"
+# Tag as v<version> so the release.yml trigger (v*.*.*) fires
+git_tag_name = "v{{version}}"
+
+[[package]]
+name = "bonk-runner"
+changelog_update = false
+git_release_enable = false
+
+[[package]]
+name = "bonk-common"
+changelog_update = false
+git_release_enable = false

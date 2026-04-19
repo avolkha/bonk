@@ -7,7 +7,7 @@ use runtime::VolumeMount;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bonk_common::{FOOTER_SIZE, Footer};
 

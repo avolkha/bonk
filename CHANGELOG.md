@@ -5,13 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Changed
-- `bonk --help` long description now renders correctly (was broken across lines)
-- `bonk-runner` progress output uses step numbers `[1/2]` / `[2/2]` matching `bonk`'s style
-- `bonk-runner` no longer leaks internal cache paths in progress messages
-
 ## [0.1.0] - 2026-04-19
 
 ### Added
@@ -25,5 +18,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Actions CI: end-to-end integration test on self-hosted runner
 - GitHub Actions Release: automated static binary builds for `x86_64` and `aarch64` (musl) on every `v*.*.*` tag
 
-[Unreleased]: https://github.com/avolkha/bonk/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/avolkha/bonk/releases/tag/v0.1.0

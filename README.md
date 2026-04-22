@@ -25,7 +25,7 @@ ssh someserver ./python3 -c "print('hello')"
 
 1. `bonk` exports a Docker image, flattens its layers, and builds a SquashFS image with `mksquashfs`
 2. Appends the SquashFS image + static tool binaries (`bwrap`, `unsquashfs`) + container config to a small runner binary
-3. The output is a single self-contained executable that extracts the rootfs on first run and execs via the embedded `bwrap`
+3. The output is a single self-contained executable. On first run it writes the embedded `.sqfs` file to a cache dir and either loop-mounts it (if run with `--mount` / as root) or extracts it via `unsquashfs`. Subsequent runs skip both steps.
 
 ```
 ┌──────────────────────┐
@@ -46,8 +46,8 @@ ssh someserver ./python3 -c "print('hello')"
 At runtime:
 1. Runner reads itself (`/proc/self/exe`), locates payload via the footer
 2. Extracts `bwrap` + `unsquashfs` to `/tmp/bonk-<hash>/bin/` (cached)
-3. Extracts rootfs to `/tmp/bonk-<hash>/rootfs/` via `unsquashfs` (cached — skipped on warm runs)
-4. Execs `bwrap` over the extracted rootfs directory
+3. Makes the rootfs available at `/tmp/bonk-<hash>/rootfs/` — kernel squashfs loop-mount if privileged (`--mount` / root), otherwise `unsquashfs` extraction (both cached; skipped on warm runs)
+4. Execs `bwrap` over the rootfs — overlay filesystem when loop-mounted (read-only lower layer + ephemeral upper), bind-mount when extracted
 5. Exits with the container's exit code
 
 ---
@@ -136,6 +136,12 @@ Following Docker semantics, extra args replace `CMD` while `ENTRYPOINT` is prese
 ./myapp -c "print(42)"  # runs: python3 -c "print(42)"
 ```
 
+### Runtime flags
+
+| Flag | Effect |
+|------|--------|
+| `--mount` | **Privileged first-run setup.** Writes the `.sqfs` file, kernel loop-mounts it at `rootfs/`, then chowns the cache dir back to the invoking user. Must be run with `sudo` or as root. Subsequent plain invocations skip this step automatically. |
+
 ### Build-time flags
 
 | Flag | Effect |
@@ -174,7 +180,7 @@ bonk/
 │   └── bonk-runner/              # embedded runner stub
 │       └── src/
 │           ├── main.rs           # payload dispatch + cache management
-│           ├── mount.rs          # unsquashfs extraction
+│           ├── mount.rs          # kernel squashfs loop-mount + unsquashfs fallback
 │           └── runtime.rs        # bwrap invocation + volume mounts
 ├── lessons/                      # guided curriculum (see below)
 └── tests/
@@ -208,17 +214,20 @@ This repo is structured as a guided Rust curriculum. Each lesson introduces lang
 
 | | bonk | dockerc |
 |---|---|---|
-| Rootfs strategy | Extract once → native directory | Mount squashfs via FUSE at runtime |
+| Rootfs strategy | Kernel squashfs loop-mount (privileged) or extract once → native dir | Mount squashfs via FUSE at runtime |
 | Embedded tools | `bwrap` + `unsquashfs` (1.2 MB) | `crun` + `squashfuse` + `fuse-overlayfs` |
 | Container runtime | bwrap (user namespaces) | crun (OCI) |
-| Disk usage | Uncompressed rootfs in cache | None (mounts directly from squashfs) |
+| Disk usage | `.sqfs` file + ephemeral overlay **or** uncompressed rootfs | None (mounts directly from squashfs) |
+| Runtime overhead | Zero (native kernel fs) | ~20 ms+ per invocation (FUSE round-trips) |
 | aarch64 16K-page kernels | ✅ works | ❌ crashes (Zig runtime panic) |
 | alpine binary size | ~5.2 MB | ~11 MB |
 | Runner stub size | ~720 KB | ~7.2 MB |
 
-**Why bonk is faster at runtime:** dockerc mounts squashfs via FUSE — every `open()` and `stat()` goes user → kernel → FUSE daemon → kernel → back, through two FUSE layers. bonk extracts to a native directory once; subsequent runs hit the filesystem directly with zero overhead.
+**Why bonk is faster at runtime:** dockerc mounts squashfs via FUSE — every `open()` and `stat()` goes user → kernel → FUSE daemon → kernel → back, through two FUSE layers. bonk either loop-mounts the squashfs directly via the kernel squashfs driver (zero FUSE overhead) or extracts to a native directory once; both strategies hit the filesystem at native speed on warm runs.
 
-**Where dockerc wins:** no disk space used for extracted rootfs — it mounts directly from the compressed squashfs.
+**Where dockerc wins:** no one-time setup step required — it mounts on every invocation without needing root.
+
+**bonk's privileged path vs. dockerc:** `sudo ./myapp --mount` runs once to set up the kernel mount, then every subsequent `./myapp` call runs unprivileged at full speed — no FUSE daemon, no extraction wait.
 
 ---
 
@@ -227,8 +236,9 @@ This repo is structured as a guided Rust curriculum. Each lesson introduces lang
 - **Linux only** — bwrap is Linux-specific
 - **No cgroup isolation** — no memory/CPU limits
 - **No multi-container orchestration** — single binaries, not a compose replacement
-- **Cache in `/tmp`** — extracted rootfs is lost on reboot; first run after reboot re-extracts
-- **Disk usage** — rootfs cache uses disk space equal to the uncompressed image
+- **Cache in `/tmp`** — cache is lost on reboot; first run after reboot re-extracts or re-mounts
+- **Privileged mount requires `sudo`** — the kernel squashfs loop-mount path needs root; without it bonk falls back to `unsquashfs` extraction
+- **Disk usage (extraction path)** — rootfs cache uses disk space equal to the uncompressed image; the mount path only stores the `.sqfs` file
 
 ---
 

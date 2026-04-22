@@ -7,11 +7,11 @@
 1. Reads its own bytes from `/proc/self/exe`
 2. Parses the footer from the last 56 bytes of the file
 3. Locates and parses the embedded `config.json`
-4. Computes a cache key and checks if the rootfs is already extracted
+4. Computes a cache key and checks if the rootfs is already ready
 5. Extracts embedded tool binaries (bwrap, unsquashfs) to cache directory
-6. Extracts the SquashFS payload to `/tmp/bonk-<hash>/rootfs/` via embedded `unsquashfs` if needed
+6. Makes the rootfs available at `/tmp/bonk-<hash>/rootfs/` — kernel squashfs loop-mount if privileged (`--mount`), otherwise `unsquashfs` extraction — both cached; skipped on warm runs
 7. Parses user-provided flags (`-v`, `--`) from `argv`
-8. Execs embedded bwrap over the extracted rootfs and exits with the container's exit code
+8. Execs embedded bwrap over the rootfs and exits with the container's exit code
 
 ---
 
@@ -93,19 +93,22 @@ let cache_dir = std::path::PathBuf::from(format!("/tmp/bonk-{:016x}", key));
 
 ### Marker files
 
-After writing the SquashFS image, create an empty "marker" file to signal that the write completed successfully:
+After making the rootfs ready, write a "marker" file to signal which strategy was used and that setup completed successfully. The content is either `"mount"` or `"extract"`:
 
 ```rust
 let marker = cache_dir.join(".bonk-ready");
 if !marker.exists() {
     let _ = std::fs::remove_dir_all(&cache_dir);
     std::fs::create_dir_all(&cache_dir)?;
-    mount::write_squashfs(payload, &sqfs_path)?;
-    std::fs::write(&marker, b"")?;  // create the marker
+    let mounted = mount::mount_or_extract(payload, &sqfs_path, &rootfs_path, unsquashfs.as_deref())?;
+    std::fs::write(&marker, if mounted { "mount" } else { "extract" })?;
 }
 ```
 
-On future runs, if the marker exists the write is skipped. If a previous run was interrupted (crash during write), the partial `.sqfs` won't have the marker, so the write will be retried from scratch.
+On future runs, reading the marker tells the runner whether the rootfs is a live kernel mount (needs
+a `/proc/mounts` check + re-mount if it disappeared after reboot) or a plain extracted directory
+(just use it directly). Without this distinction the runner might try to overlay a directory that
+is no longer a squashfs mount, leading to a bwrap permission error.
 
 ### Manual argument parsing with `std::env::args()`
 
@@ -237,7 +240,7 @@ config:   data[footer.config_offset() .. footer.config_offset() + footer.config_
 
 Parse the config slice with `serde_json::from_slice::<ContainerConfig>(config_slice)?`.
 
-### Task 6 — Cache check and extraction
+### Task 6 — Cache check and rootfs setup
 
 Compute the cache key by hashing the first 4 KB of the payload and the payload size.
 
@@ -245,38 +248,46 @@ Define the cache layout:
 ```
 /tmp/bonk-<hash>/
     bin/            ← extracted embedded tools (bwrap, unsquashfs)
-    rootfs/         ← extracted rootfs directory
-    .bonk-ready     ← marker: extraction complete
+    rootfs/         ← squashfs mountpoint or extracted rootfs directory
+    rootfs.sqfs     ← squashfs file (kept when loop-mounted; removed after extraction)
+    .bonk-ready     ← marker: content is "mount" or "extract"
 ```
 
-If the marker is absent:
+The `--mount` flag enables a privileged first-run setup path (requires root / `sudo`):
+- Write the `.sqfs` to the cache dir, create `rootfs/` and `bin/`
+- Call `mount::try_squashfs_mount(&sqfs_path, &rootfs_path)` to kernel loop-mount it
+- Write marker `"mount"`
+- `chown` the cache dir back to `SUDO_UID:SUDO_GID` so the invoking user owns it
+
+On a normal (non-`--mount`) cold start:
 1. `remove_dir_all` the cache dir (clean any partial state)
+2. Extract embedded tools into `bin/` as before
+3. Call `mount::mount_or_extract(payload, &sqfs_path, &rootfs_path, unsquashfs.as_deref())?`
+   which tries a kernel mount first and falls back to `unsquashfs` extraction; returns `true` if mounted
+4. Write marker `"mount"` or `"extract"` depending on the return value
 
-2. Extract embedded tools: if `footer.has_embedded_tools()`, create `bin/` in the
-   cache dir and write the bwrap and unsquashfs binaries from the embedded data
-   (using `footer.bwrap_offset()` / `footer.unsquashfs_offset()` to locate them).
-   Set permissions to `0o755`. This is idempotent — skip if the files already exist.
+On a warm run, read the marker:
+- `"mount"` → check `mount::is_squashfs_mounted(&rootfs_path)`; re-mount if it’s gone (reboot)
+- `"extract"` → rootfs dir is already on disk, nothing to do
+- absent/other → treat as cold start
 
-3. Call `mount::extract_rootfs(payload, &rootfs_path, unsquashfs_path.as_deref())?`
-   where `unsquashfs_path` is the path to the extracted embedded unsquashfs
-   (or `None` for binaries without embedded tools, which fall back to system `unsquashfs`)
-
-4. Write the marker file
+The `rootfs_readonly` flag passed to `runtime::run` should be `true` when the marker is `"mount"`,
+because bwrap must use an overlay filesystem over a read-only squashfs mountpoint.
 
 Create a helper function `extract_embedded_tools` that takes the footer, exe
-data, and cache dir, and returns `Result<(Option<PathBuf>, Option<PathBuf>)>`
-for the bwrap and unsquashfs paths.
+data, and cache dir, and returns `Result<EmbeddedTools>` containing optional
+paths to the bwrap and unsquashfs binaries.
 
 ### Task 7 — Launch
 
-Call `runtime::run(&rootfs_path, &config, &extra_args, &volumes, bwrap_path.as_deref(), stdin_is_tty)` — this returns
-a `Result<std::process::ExitStatus>`. The `bwrap_path` is `Some(path)` if the
-footer has embedded tools, or `None` for binaries without embedded tools (falls back to system `bwrap`).
+Call `runtime::run(&rootfs_path, &config, &extra_args, &volumes, bwrap_path.as_deref(), stdin_is_tty, rootfs_readonly)` — this returns
+a `Result<std::process::ExitStatus>`. `rootfs_readonly` is `true` when the marker was `"mount"` (squashfs loop-mounted);
+bwrap must use an overlay filesystem in that case.
 
 No cleanup is needed (no FUSE daemon to unmount), so just exit with the code:
 
 ```rust
-let status = runtime::run(&rootfs_path, &config, &extra_args, &volumes, bwrap_path.as_deref(), stdin_is_tty)?;
+let status = runtime::run(&rootfs_path, &config, &extra_args, &volumes, bwrap_path.as_deref(), stdin_is_tty, rootfs_readonly)?;
 std::process::exit(status.code().unwrap_or(1));
 ```
 
@@ -310,5 +321,5 @@ fn main() {
 ## Next lesson
 
 In Lesson 10 — the final lesson — you'll implement `mount.rs` and `runtime.rs`:
-extracting the SquashFS image via `unsquashfs` and building the full `bwrap`
+the tiered squashfs mount strategy (kernel loop-mount with `unsquashfs` fallback) and the full `bwrap`
 command that fires up the container.

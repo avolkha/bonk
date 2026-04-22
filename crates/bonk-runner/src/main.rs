@@ -19,6 +19,15 @@ macro_rules! log {
     };
 }
 
+/// Single marker file. Content is "mount" or "extract" to record which
+/// strategy was used on the cold start.
+const MARKER: &str = ".bonk-ready";
+
+struct EmbeddedTools {
+    bwrap: Option<PathBuf>,
+    unsquashfs: Option<PathBuf>,
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -42,6 +51,10 @@ fn main() -> Result<()> {
         eprintln!("OPTIONS:");
         eprintln!("  -v, --volume HOST:GUEST[:ro]   Bind-mount a host path into the container.");
         eprintln!("                                 Append :ro for a read-only mount. Repeatable.");
+        eprintln!("  --mount                        Mount the embedded squashfs rootfs and exit.");
+        eprintln!("                                 Requires root. Run once with sudo to enable");
+        eprintln!("                                 persistent squashfs mounts for all subsequent");
+        eprintln!("                                 invocations (no extraction needed).");
         eprintln!("  -q, --quiet                    Suppress progress output.");
         eprintln!("  -V, --version                  Print version and exit.");
         eprintln!("  -h, --help                     Print this help and exit.");
@@ -57,6 +70,7 @@ fn main() -> Result<()> {
         eprintln!();
         eprintln!("EXAMPLES:");
         eprintln!("  {bin_name} echo hello");
+        eprintln!("  sudo {bin_name} --mount && {bin_name} echo hello");
         eprintln!("  {bin_name} -v /data:/data -- python3 /data/script.py");
         eprintln!("  {bin_name} -v /etc/passwd:/etc/passwd:ro id");
         std::process::exit(0);
@@ -65,6 +79,7 @@ fn main() -> Result<()> {
     let mut volumes: Vec<VolumeMount> = Vec::new();
     let mut extra_args: Vec<String> = Vec::new();
     let mut quiet = false;
+    let mut do_mount_only = false;
     let mut saw_sep = false;
     let stdin_is_tty = std::io::stdin().is_terminal();
 
@@ -75,6 +90,8 @@ fn main() -> Result<()> {
             extra_args.push(arg.clone());
         } else if arg == "--" {
             saw_sep = true;
+        } else if arg == "--mount" {
+            do_mount_only = true;
         } else if arg == "-q" || arg == "--quiet" {
             quiet = true;
         } else if arg == "-v" || arg == "--volume" {
@@ -110,30 +127,98 @@ fn main() -> Result<()> {
     let key: u64 = hasher.finish();
     let cache_dir = PathBuf::from(format!("/tmp/bonk-{:016x}", key));
     let rootfs_path = cache_dir.join("rootfs");
-    let marker = cache_dir.join(".bonk-ready");
+    let sqfs_path = cache_dir.join("rootfs.sqfs");
+    let marker = cache_dir.join(MARKER);
 
-    let (bwrap_path, _unsquashfs_path) = if !marker.exists() {
-        let _ = std::fs::remove_dir_all(&cache_dir);
-        std::fs::create_dir_all(&rootfs_path).context("failed to create rootfs dir")?;
-        let paths = extract_embedded_tools(&footer, &exe_data, &cache_dir)?;
-        log!(quiet, "bonk: [1/2] extracting rootfs...");
-        mount::extract_rootfs(payload, &rootfs_path, paths.1.as_deref())?;
-        std::fs::write(&marker, b"").context("failed to write marker")?;
-        log!(quiet, "bonk: [2/2] starting container");
-        paths
-    } else {
-        log!(quiet, "bonk: using cached rootfs");
-        log!(quiet, "bonk: starting container");
-        extract_embedded_tools(&footer, &exe_data, &cache_dir)?
+    // --mount: privileged setup step, meant to be run via sudo.
+    // Mounts the squashfs, pre-creates bin/, chowns the cache dir back to
+    // the invoking user (SUDO_UID/SUDO_GID) so unprivileged runs can write
+    // tool binaries there. The squashfs mountpoint itself stays root-owned.
+    if do_mount_only {
+        let bin_dir = cache_dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).context("failed to create bin dir")?;
+        std::fs::create_dir_all(&rootfs_path).context("failed to create rootfs mountpoint")?;
+        log!(quiet, "bonk: writing squashfs...");
+        std::fs::write(&sqfs_path, payload).context("failed to write squashfs payload")?;
+        log!(
+            quiet,
+            "bonk: mounting squashfs at {}...",
+            rootfs_path.display()
+        );
+        mount::try_squashfs_mount(&sqfs_path, &rootfs_path)
+            .context("mount failed — are you running as root?")?;
+        std::fs::write(&marker, b"mount").context("failed to write marker")?;
+        // Chown non-mountpoint files to the invoking user
+        if let (Ok(uid), Ok(gid)) = (std::env::var("SUDO_UID"), std::env::var("SUDO_GID")) {
+            let _ = std::process::Command::new("chown")
+                .arg("-R")
+                .arg(format!("{uid}:{gid}"))
+                .arg(&bin_dir)
+                .arg(&sqfs_path)
+                .arg(&marker)
+                .status();
+        }
+        log!(
+            quiet,
+            "bonk: mounted — subsequent invocations will use the cached mount"
+        );
+        return Ok(());
+    }
+
+    // Read the marker to determine prior strategy ("mount" or "extract").
+    let prior_strategy = std::fs::read_to_string(&marker).ok();
+
+    let rootfs_readonly = match prior_strategy.as_deref() {
+        Some("mount") => {
+            if !mount::is_squashfs_mounted(&rootfs_path) {
+                // Mount gone (e.g. after reboot) — try to re-mount
+                log!(quiet, "bonk: squashfs mount gone — re-mounting...");
+                std::fs::write(&sqfs_path, payload)
+                    .context("failed to write squashfs for re-mount")?;
+                mount::try_squashfs_mount(&sqfs_path, &rootfs_path).with_context(|| {
+                    format!(
+                        "squashfs mount disappeared and re-mount failed.\n\
+                         Run `sudo {} --mount` to restore it.",
+                        bin_name
+                    )
+                })?;
+                log!(quiet, "bonk: re-mounted successfully");
+            } else {
+                log!(quiet, "bonk: using cached squashfs mount");
+            }
+            true
+        }
+        Some("extract") => {
+            log!(quiet, "bonk: using cached rootfs");
+            false
+        }
+        _ => {
+            // Cold start
+            let _ = std::fs::remove_dir_all(&cache_dir);
+            log!(quiet, "bonk: [1/2] preparing rootfs...");
+            let tools = extract_embedded_tools(&footer, &exe_data, &cache_dir)?;
+            let mounted = mount::mount_or_extract(
+                payload,
+                &sqfs_path,
+                &rootfs_path,
+                tools.unsquashfs.as_deref(),
+            )?;
+            let strategy = if mounted { "mount" } else { "extract" };
+            std::fs::write(&marker, strategy).context("failed to write marker")?;
+            log!(quiet, "bonk: [2/2] starting container");
+            mounted
+        }
     };
 
+    let tools = extract_embedded_tools(&footer, &exe_data, &cache_dir)?;
     let status = runtime::run(
         &rootfs_path,
         &config,
         &extra_args,
         &volumes,
-        bwrap_path.as_deref(),
+        tools.bwrap.as_deref(),
         stdin_is_tty,
+        rootfs_readonly,
     )?;
     std::process::exit(status.code().unwrap_or(1));
 }
@@ -142,9 +227,12 @@ fn extract_embedded_tools(
     footer: &Footer,
     exe_data: &[u8],
     cache_dir: &Path,
-) -> Result<(Option<PathBuf>, Option<PathBuf>)> {
+) -> Result<EmbeddedTools> {
     if !footer.has_embedded_tools() {
-        return Ok((None, None));
+        return Ok(EmbeddedTools {
+            bwrap: None,
+            unsquashfs: None,
+        });
     }
 
     let bin_dir = cache_dir.join("bin");
@@ -155,20 +243,28 @@ fn extract_embedded_tools(
 
     if !bwrap_path.exists() {
         let start = footer.bwrap_offset() as usize;
-        let end = start + footer.bwrap_size as usize;
-        std::fs::write(&bwrap_path, &exe_data[start..end]).context("failed to write bwrap")?;
+        std::fs::write(
+            &bwrap_path,
+            &exe_data[start..start + footer.bwrap_size as usize],
+        )
+        .context("failed to write bwrap")?;
         set_executable(&bwrap_path)?;
     }
 
     if !unsquashfs_path.exists() {
         let start = footer.unsquashfs_offset() as usize;
-        let end = start + footer.unsquashfs_size as usize;
-        std::fs::write(&unsquashfs_path, &exe_data[start..end])
-            .context("failed to write unsquashfs")?;
+        std::fs::write(
+            &unsquashfs_path,
+            &exe_data[start..start + footer.unsquashfs_size as usize],
+        )
+        .context("failed to write unsquashfs")?;
         set_executable(&unsquashfs_path)?;
     }
 
-    Ok((Some(bwrap_path), Some(unsquashfs_path)))
+    Ok(EmbeddedTools {
+        bwrap: Some(bwrap_path),
+        unsquashfs: Some(unsquashfs_path),
+    })
 }
 
 fn set_executable(path: &Path) -> Result<()> {

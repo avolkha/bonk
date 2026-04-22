@@ -181,8 +181,15 @@ mod tests {
     use std::io::Write;
     use std::sync::Mutex;
 
-    // Serialises tests that mutate BONK_TOOLS_DIR to avoid races with parallel test threads.
+    // Serialises ALL tests that read or mutate BONK_TOOLS_DIR.
+    // Every test that calls set_var OR remove_var on BONK_TOOLS_DIR must hold
+    // this guard for the duration of the test.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        // Recover from a poisoned lock so one panicking test doesn't cascade.
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn test_override_path_resolves_correctly() {
@@ -212,7 +219,7 @@ mod tests {
 
     #[test]
     fn test_bonk_tools_dir_finds_binary() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("mytool"), b"tool bytes").unwrap();
         unsafe {
@@ -227,7 +234,7 @@ mod tests {
 
     #[test]
     fn test_bonk_tools_dir_set_but_file_absent_falls_through_to_path() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         // Point BONK_TOOLS_DIR at an empty dir so step 1 misses,
         // then rely on step 5 (PATH) to find `cat`.
         let dir = tempfile::tempdir().unwrap();
@@ -243,6 +250,7 @@ mod tests {
 
     #[test]
     fn test_path_search_finds_system_binary() {
+        let _guard = env_lock();
         // `cat` is available on every Unix system.
         unsafe {
             std::env::remove_var("BONK_TOOLS_DIR");
@@ -253,6 +261,7 @@ mod tests {
 
     #[test]
     fn test_sibling_of_exe_is_found() {
+        let _guard = env_lock();
         // The test binary itself is a sibling of itself.
         let exe = std::env::current_exe().unwrap();
         let name = exe.file_name().unwrap().to_str().unwrap().to_string();
@@ -265,6 +274,7 @@ mod tests {
 
     #[test]
     fn test_not_found_returns_helpful_error() {
+        let _guard = env_lock();
         unsafe {
             std::env::remove_var("BONK_TOOLS_DIR");
         }

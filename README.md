@@ -140,7 +140,7 @@ Following Docker semantics, extra args replace `CMD` while `ENTRYPOINT` is prese
 
 | Flag | Effect |
 |------|--------|
-| `--mount` | **Privileged first-run setup.** Writes the `.sqfs` file, kernel loop-mounts it at `rootfs/`, then chowns the cache dir back to the invoking user. Must be run with `sudo` or as root. Subsequent plain invocations skip this step automatically. |
+| `--mount` | **Privileged first-run setup.** Writes the `.sqfs` file, kernel loop-mounts it at `rootfs/`, then chowns `bin/`, `rootfs.sqfs`, the marker file, and the cache dir itself back to the invoking user (`SUDO_UID:SUDO_GID`) so unprivileged runs can access the cache. The squashfs mountpoint stays root-owned. Must be run with `sudo` or as root. Subsequent plain invocations skip this step automatically. |
 
 ### Build-time flags
 

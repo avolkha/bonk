@@ -325,4 +325,34 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "--overlay-src"));
         assert_contains_sequence(&args, &["--", "echo", "from-image"]);
     }
+
+    #[test]
+    fn test_run_errors_when_rootfs_readonly_but_overlay_unavailable() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let log_path = tempdir.path().join("args.log");
+        // bwrap whose --help output does NOT contain --overlay-src
+        let bwrap = write_fake_bwrap(tempdir.path(), &log_path, false, 0);
+        let rootfs = tempdir.path().join("rootfs");
+        fs::create_dir_all(&rootfs).unwrap();
+
+        let err = run(
+            &rootfs,
+            &bonk_common::ContainerConfig {
+                cmd: vec!["echo".into()],
+                ..bonk_common::ContainerConfig::default()
+            },
+            &[],
+            &[],
+            Some(&bwrap),
+            false,
+            true, // rootfs_readonly = true
+        )
+        .unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("overlay"),
+            "expected 'overlay' in error, got: {msg}"
+        );
+    }
 }

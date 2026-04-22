@@ -135,6 +135,13 @@ fn main() -> Result<()> {
     // the invoking user (SUDO_UID/SUDO_GID) so unprivileged runs can write
     // tool binaries there. The squashfs mountpoint itself stays root-owned.
     if do_mount_only {
+        // Validate cache_dir is not a pre-placed symlink before operating as root.
+        if cache_dir.exists() && cache_dir.symlink_metadata()?.file_type().is_symlink() {
+            anyhow::bail!(
+                "cache dir {} is a symlink — refusing to operate as root",
+                cache_dir.display()
+            );
+        }
         let bin_dir = cache_dir.join("bin");
         std::fs::create_dir_all(&bin_dir).context("failed to create bin dir")?;
         std::fs::create_dir_all(&rootfs_path).context("failed to create rootfs mountpoint")?;
@@ -148,14 +155,23 @@ fn main() -> Result<()> {
         mount::try_squashfs_mount(&sqfs_path, &rootfs_path)
             .context("mount failed — are you running as root?")?;
         std::fs::write(&marker, b"mount").context("failed to write marker")?;
-        // Chown non-mountpoint files to the invoking user
+        // Chown cache artifacts back to the invoking user.
+        // chown cache_dir itself (non-recursively) so unprivileged runs can
+        // create/remove files in it without touching the squashfs mountpoint.
         if let (Ok(uid), Ok(gid)) = (std::env::var("SUDO_UID"), std::env::var("SUDO_GID")) {
+            let owner = format!("{uid}:{gid}");
             let _ = std::process::Command::new("chown")
                 .arg("-R")
-                .arg(format!("{uid}:{gid}"))
+                .arg(&owner)
                 .arg(&bin_dir)
                 .arg(&sqfs_path)
                 .arg(&marker)
+                .status();
+            // Chown the cache dir itself separately (not -R, to avoid touching
+            // the squashfs mountpoint inside it).
+            let _ = std::process::Command::new("chown")
+                .arg(&owner)
+                .arg(&cache_dir)
                 .status();
         }
         log!(
@@ -195,6 +211,9 @@ fn main() -> Result<()> {
         _ => {
             // Cold start
             let _ = std::fs::remove_dir_all(&cache_dir);
+            // Always create cache_dir first — mount_or_extract writes sqfs_path
+            // into it regardless of whether tools are embedded.
+            std::fs::create_dir_all(&cache_dir).context("failed to create cache dir")?;
             log!(quiet, "bonk: [1/2] preparing rootfs...");
             let tools = extract_embedded_tools(&footer, &exe_data, &cache_dir)?;
             let mounted = mount::mount_or_extract(

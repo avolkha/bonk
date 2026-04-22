@@ -257,7 +257,7 @@ The `--mount` flag enables a privileged first-run setup path (requires root / `s
 - Write the `.sqfs` to the cache dir, create `rootfs/` and `bin/`
 - Call `mount::try_squashfs_mount(&sqfs_path, &rootfs_path)` to kernel loop-mount it
 - Write marker `"mount"`
-- `chown` the cache dir back to `SUDO_UID:SUDO_GID` so the invoking user owns it
+- Chown `bin/`, `rootfs.sqfs`, and the marker back to `SUDO_UID:SUDO_GID` (recursively), then chown `cache_dir` itself (non-recursively) so unprivileged runs can access and clean up the cache without touching the squashfs mountpoint
 
 On a normal (non-`--mount`) cold start:
 1. `remove_dir_all` the cache dir (clean any partial state)

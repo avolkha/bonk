@@ -31,7 +31,7 @@ pub fn mount_or_extract(
 
 /// Attempt a kernel squashfs loop mount. Requires the caller to be root.
 pub fn try_squashfs_mount(sqfs_path: &Path, dest: &Path) -> Result<()> {
-    let status = std::process::Command::new("mount")
+    let output = std::process::Command::new("mount")
         .arg("-t")
         .arg("squashfs")
         .arg("-o")
@@ -39,11 +39,17 @@ pub fn try_squashfs_mount(sqfs_path: &Path, dest: &Path) -> Result<()> {
         .arg(sqfs_path)
         .arg(dest)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+        .stderr(std::process::Stdio::piped())
+        .output()
         .context("failed to run mount")?;
-    if !status.success() {
-        anyhow::bail!("mount failed with status: {}", status);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            anyhow::bail!("mount failed with status: {}", output.status);
+        } else {
+            anyhow::bail!("mount failed ({}): {}", output.status, stderr);
+        }
     }
     Ok(())
 }

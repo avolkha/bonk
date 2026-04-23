@@ -4,8 +4,8 @@
 
 The final two files of `bonk-runner`:
 
-- `crates/bonk-runner/src/mount.rs` — extract the embedded SquashFS payload to a
-  native directory via embedded `unsquashfs` (or system `unsquashfs` if tools are not embedded)
+- `crates/bonk-runner/src/mount.rs` — make the SquashFS payload available at `rootfs/`:
+  try a kernel squashfs loop-mount (requires root), fall back to `unsquashfs` extraction
 - `crates/bonk-runner/src/runtime.rs` — build and execute the `bwrap` command that runs the container,
   using the embedded `bwrap` binary if available
 
@@ -17,36 +17,50 @@ The output binary is fully self-contained — no runtime dependencies beyond a L
 
 ## Concepts
 
-### Extracting a SquashFS image with `unsquashfs`
+### Tiered rootfs strategy: kernel mount vs. `unsquashfs`
 
-`unsquashfs` is a command-line tool (from the `squashfs-tools` package) that
-extracts a SquashFS image to a regular directory on disk. Unlike `squashfuse`
-(a FUSE daemon that mounts the image), `unsquashfs` is a one-shot process:
+bonk uses a tiered approach to make the rootfs available:
+
+1. **Kernel squashfs loop-mount** (privileged path): `mount -t squashfs -o loop,ro rootfs.sqfs rootfs/`
+   - Requires root (or `sudo ./myapp --mount` for first-run setup)
+   - Keeps the image in compressed form on disk — no uncompressed copy
+   - bwrap overlays an ephemeral upper layer so each run gets a clean slate
+   - After the `--mount` setup, all subsequent invocations run unprivileged
+
+2. **`unsquashfs` extraction** (unprivileged fallback): extracts to a plain directory
+   - Works without root, same as the original strategy
+   - Uses more disk (uncompressed rootfs), but no special privileges needed
+
+`mount_or_extract` tries the kernel mount first, falls back to extraction on failure, and returns `true`
+if mounted (so the caller knows to pass `rootfs_readonly: true` to `runtime::run`).
+
+### Detecting an active squashfs mount
+
+On warm runs, the runner needs to verify the kernel mount is still live (it disappears after a reboot).
+Parse `/proc/mounts` — each line is `device mountpoint fstype options dump pass`:
 
 ```rust
-let status = std::process::Command::new("unsquashfs")
-    .arg("-f")          // force overwrite
-    .arg("-d")          // destination directory
-    .arg(dest_path)
-    .arg(sqfs_path)     // the .sqfs file to extract
-    .stdout(Stdio::null())   // suppress file listing
-    .stderr(Stdio::piped())  // capture errors
-    .status()
-    .context("failed to run unsquashfs — is squashfs-tools installed?")?;
+pub fn is_squashfs_mounted(path: &Path) -> bool {
+    let Ok(data) = std::fs::read_to_string("/proc/mounts") else { return false; };
+    let path_str = path.to_string_lossy();
+    data.lines().any(|line| {
+        let mut parts = line.splitn(4, ' ');
+        let _dev = parts.next();
+        let mountpoint = parts.next().unwrap_or("");
+        let fstype = parts.next().unwrap_or("");
+        mountpoint == path_str.as_ref() && fstype == "squashfs"
+    })
+}
 ```
 
-This runs synchronously — when it returns, the rootfs is fully extracted and
-ready to use. No daemon to manage, no polling for mount readiness, no cleanup
-on exit.
-
-### Why extract instead of FUSE mount?
+### Why not always use FUSE (`squashfuse`)?
 
 An earlier design used `squashfuse` to mount the SquashFS image via FUSE.
 This avoided writing the extracted rootfs to disk but added ~20 ms of FUSE
 overhead per invocation, plus significant slowdowns on file-heavy workloads
 (Python imports, DuckDB startup) where every `open()` / `stat()` syscall went
-through the FUSE kernel path. Extracting once and reusing the native directory
-eliminates this overhead entirely.
+through the FUSE kernel path. The kernel squashfs driver has zero FUSE overhead
+— it serves files directly from the kernel's VFS layer.
 
 ### Why read-only rootfs matters
 
@@ -201,22 +215,40 @@ piped input.
 
 ## Tasks
 
-### Task 1 — `extract_rootfs`
+### Task 1 — `mount_or_extract`, `try_squashfs_mount`, `is_squashfs_mounted`
 
-In `src/mount.rs`, implement a single function:
+In `src/mount.rs`, implement three public functions:
 
 ```
-pub fn extract_rootfs(payload: &[u8], dest: &Path, unsquashfs_bin: Option<&Path>) -> Result<()>
+pub fn mount_or_extract(
+    payload: &[u8],
+    sqfs_path: &Path,
+    dest: &Path,
+    unsquashfs: Option<&Path>,
+) -> Result<bool>
 ```
 
-1. Write `payload` to a temporary file (`dest.with_extension("sqfs")`)
-2. Determine the unsquashfs command: use `unsquashfs_bin` if provided (embedded tool), otherwise fall back to `"unsquashfs"` from PATH
-3. Run `<unsquashfs> -f -d <dest> <sqfs_path>` with stdout suppressed and stderr piped
-4. Check the exit status — bail with a context message including stderr if non-zero
-5. Delete the temporary `.sqfs` file
-6. Return `Ok(())`
+1. Write `payload` to `sqfs_path`
+2. Create `dest` directory
+3. Call `try_squashfs_mount(sqfs_path, dest)` — if it succeeds, return `Ok(true)`
+4. On failure, call the private `extract_via_unsquashfs(sqfs_path, dest, unsquashfs)` helper
+5. Delete `sqfs_path` after successful extraction
+6. Return `Ok(false)`
 
-This is the entire file — about 40 lines including imports.
+```
+pub fn try_squashfs_mount(sqfs_path: &Path, dest: &Path) -> Result<()>
+```
+
+Run `mount -t squashfs -o loop,ro <sqfs_path> <dest>` and bail if the exit status is non-zero.
+
+```
+pub fn is_squashfs_mounted(path: &Path) -> bool
+```
+
+Parse `/proc/mounts` and return `true` if any line has `mountpoint == path && fstype == "squashfs"`.
+
+Also implement the private helper `extract_via_unsquashfs(sqfs_path, dest, unsquashfs)` that runs
+`<unsquashfs> -f -d <dest> <sqfs_path>` with stdout/stderr suppressed.
 
 ### Task 2 — `VolumeMount` struct
 
@@ -270,6 +302,7 @@ pub fn run(
     volumes: &[VolumeMount],
     bwrap_bin: Option<&Path>,
     stdin_is_tty: bool,
+    rootfs_readonly: bool,
 ) -> Result<ExitStatus>
 ```
 
@@ -277,30 +310,25 @@ Build the `bwrap` command step by step:
 me::run not yet implemented")
 }
 1. Determine the `bwrap` binary: use `bwrap_bin` if provided (embedded tool), then check `BONK_BWRAP` env var, then fall back to `"bwrap"` from PATH
-2. Probe for bwrap overlay support: spawn `bwrap --overlay-src / --tmp-overlay / -- true`:and check the exit code. If it succeeds, use overlay mode; otherwise fall back to `--bind rootfs /`
+2. Probe for bwrap overlay support: run `bwrap --help` and check whether the output contains `"--overlay-src"`. This avoids a live mount probe (which can fail with `EINVAL` on some kernels due to `userxattr`). If `rootfs_readonly` is `true` and overlay is not available, bail with a clear error.
 3. Overlay mode: `--overlay-src rootfs / --tmp-overlay /` — read-only lower layer + disposable upper
-4. Fallback mode: `--bind rootfs /` — direct read-write access (bwrap < 0.9)
-5. `--dev /dev` — expose device nodes
-6. `--proc /proc` — mount procfs
-7. `--tmpfs /tmp` and `--tmpfs /run`
-8. For each volume: `--bind host guest` or `--ro-bind host guest`
-9. **Namespace and UID handling (root-aware):**
-   - Detect if running as root: `unsafe { libc::getuid() } == 0`
-   - If **rootless**: `--unshare-all --share-net --uid 0 --gid 0`
-   - If **root**: `--unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup` (no `--unshare-user`, no `--uid`/`--gid` — already UID 0)
-10. `--hostname bonk`
-11. `--ro-bind /etc/resolv.conf /etc/resolv.conf` (for DNS)
-12. Only add `--new-session` if `stdin_is_tty` is `true` — when stdin is piped, `--new-session` causes signal delivery issues
-13. `--clearenv`
-14. For each `KEY=VALUE` in `config.env`: `--setenv KEY VALUE`
-15. Pass through `TERM` from the host: `--setenv TERM <value-of-TERM>`
-16. `--chdir <config.working_dir>`
-17. `--` followed by `resolve_command(config, extra_args)`
+4. Fallback bind mode (when not `rootfs_readonly` and overlay unavailable): `--bind rootfs /`
+5. `--dev /dev`, `--proc /proc`, `--tmpfs /tmp`, `--tmpfs /run`
+6. For each volume: `--bind host guest` or `--ro-bind host guest`
+7. **`--clearenv` must come before any `--setenv`** — bwrap processes args left-to-right; if `--clearenv` comes after `--setenv`, it wipes the vars you just set
+8. For each `KEY=VALUE` in `config.env`: `--setenv KEY VALUE`
+9. Pass through `TERM` from the host: `--setenv TERM <value-of-TERM>`
+10. **Namespace and UID handling (root-aware):**
+    - Detect if running as root: `unsafe { libc::getuid() } == 0`
+    - If **rootless**: `--unshare-all --share-net --uid 0 --gid 0`
+    - If **root**: `--unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup` (no `--unshare-user`, no `--uid`/`--gid` — already UID 0)
+11. `--hostname bonk`
+12. `--ro-bind /etc/resolv.conf /etc/resolv.conf` (for DNS)
+13. Only add `--new-session` if `stdin_is_tty` is `true`
+14. `--chdir <config.working_dir>`
+15. `--` followed by `resolve_command(config, extra_args)`
 
 Run with `.status()?` and return `Ok(status)`.
-
-The caller (lesson 09's `run()` function) just calls
-`std::process::exit(status.code().unwrap_or(1))`.
 
 ### Task 7 — End-to-end test
 
@@ -385,4 +413,4 @@ You have rebuilt `bonk` from scratch. Here is what you implemented across 10 les
 | 07 | `flatten::flatten_layers` | iterators, tar archives, OCI whiteouts, fs operations |
 | 08 | `pack.rs` | shelling out (`Command`), binary file assembly, `0o755` permissions |
 | 09 | `bonk-runner/main.rs` | self-reading binaries, hashing, manual arg parsing, cache management, tool extraction |
-| 10 | `mount.rs` + `runtime.rs` | SquashFS extraction, embedded tools, `bwrap` overlay, ENTRYPOINT logic |
+| 10 | `mount.rs` + `runtime.rs` | kernel squashfs loop-mount, `unsquashfs` fallback, embedded tools, `bwrap` overlay, ENTRYPOINT logic |

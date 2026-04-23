@@ -47,6 +47,7 @@ pub fn run(
     volumes: &[VolumeMount],
     bwrap_path: Option<&std::path::Path>,
     stdin_is_tty: bool,
+    rootfs_readonly: bool,
 ) -> Result<std::process::ExitStatus> {
     let bwrap_bin = match bwrap_path {
         Some(path) => path.to_path_buf(),
@@ -60,17 +61,27 @@ pub fn run(
             }
         }
     };
+    // Probe overlay support via --help text rather than a live mount invocation.
+    // The live probe triggers a userxattr-overlay attempt that fails with EINVAL
+    // on kernels/filesystems that don't support the userxattr mount option.
     let bwrap_supports_overlay = std::process::Command::new(&bwrap_bin)
-        .arg("--overlay-src")
-        .arg("/")
-        .arg("--tmp-overlay")
-        .arg("/")
-        .arg("--")
-        .arg("true")
-        .status()
-        .map(|s| s.success())
+        .arg("--help")
+        .output()
+        .map(|o| {
+            let text = String::from_utf8_lossy(&o.stdout).into_owned()
+                + &String::from_utf8_lossy(&o.stderr);
+            text.contains("--overlay-src")
+        })
         .unwrap_or(false);
-    if !bwrap_supports_overlay {
+    // A read-only rootfs (squashfs loop mount) requires overlay so bwrap can
+    // set up a writable tmpfs layer on top.
+    if rootfs_readonly && !bwrap_supports_overlay {
+        anyhow::bail!(
+            "rootfs is read-only (squashfs mount) but this bwrap does not support overlay.\n\
+             Delete the cache dir and re-run to fall back to unsquashfs extraction."
+        );
+    }
+    if !bwrap_supports_overlay && !rootfs_readonly {
         eprintln!("warning: bwrap does not support overlay mode, falling back to bind mounts");
     }
     let mut cmd = std::process::Command::new(bwrap_bin);
@@ -113,18 +124,17 @@ pub fn run(
         }
     }
 
-    if !config.env.is_empty() {
-        for env in &config.env {
-            let (key, value) = env.split_once('=').unwrap_or((env.as_str(), ""));
-            cmd.arg("--setenv").arg(key).arg(value);
-        }
+    // --clearenv must precede all --setenv so the image env vars survive.
+    cmd.arg("--clearenv");
+    for env in &config.env {
+        let (key, value) = env.split_once('=').unwrap_or((env.as_str(), ""));
+        cmd.arg("--setenv").arg(key).arg(value);
+    }
+    if let Ok(term) = std::env::var("TERM") {
+        cmd.arg("--setenv").arg("TERM").arg(term);
     }
     if stdin_is_tty {
         cmd.arg("--new-session");
-    }
-    cmd.arg("--clearenv");
-    if let Ok(term) = std::env::var("TERM") {
-        cmd.arg("--setenv").arg("TERM").arg(term);
     }
     cmd.arg("--chdir").arg(&config.working_dir);
     cmd.arg("--").args(resolve_cmd(config, extra_args)?);
@@ -155,14 +165,19 @@ mod tests {
         exit_code: i32,
     ) -> std::path::PathBuf {
         let script = dir.join("fake-bwrap.sh");
-        let probe_exit = if overlay_probe_success { 0 } else { 1 };
+        let overlay_help = if overlay_probe_success {
+            "--overlay-src"
+        } else {
+            ""
+        };
         fs::write(
             &script,
             format!(
                 "#!/bin/sh\n\
                  set -eu\n\
-                 if [ \"$#\" -ge 5 ] && [ \"$1\" = \"--overlay-src\" ] && [ \"$2\" = \"/\" ] && [ \"$3\" = \"--tmp-overlay\" ] && [ \"$4\" = \"/\" ] && [ \"$5\" = \"--\" ]; then\n\
-                 \texit {probe_exit}\n\
+                 if [ \"$#\" -eq 1 ] && [ \"$1\" = \"--help\" ]; then\n\
+                 \techo '{overlay_help}'\n\
+                 \texit 0\n\
                  fi\n\
                  printf '%s\\n' \"$@\" > '{}'\n\
                  exit {exit_code}\n",
@@ -252,6 +267,7 @@ mod tests {
             &volumes,
             Some(&bwrap),
             true,
+            false,
         )
         .unwrap();
 
@@ -270,7 +286,13 @@ mod tests {
         assert_contains_sequence(&args, &["--ro-bind", "/tmp/host", "/guest"]);
         assert_contains_sequence(&args, &["--setenv", "KEY", "value"]);
         assert_contains_sequence(&args, &["--setenv", "EMPTY", ""]);
-        assert_contains_sequence(&args, &["--new-session", "--clearenv"]);
+        assert_contains_sequence(&args, &["--clearenv", "--setenv", "KEY", "value"]);
+        assert_contains_sequence(
+            &args,
+            &["--setenv", "KEY", "value", "--setenv", "EMPTY", ""],
+        );
+        // --new-session comes after the env block
+        assert!(args.iter().any(|a| a == "--new-session"));
         assert_contains_sequence(&args, &["--chdir", "/work", "--", "echo", "hi"]);
     }
 
@@ -292,6 +314,7 @@ mod tests {
             &[],
             Some(&bwrap),
             false,
+            false,
         )
         .unwrap();
 
@@ -301,5 +324,35 @@ mod tests {
         assert_contains_sequence(&args, &["--bind", rootfs.to_str().unwrap(), "/"]);
         assert!(!args.iter().any(|arg| arg == "--overlay-src"));
         assert_contains_sequence(&args, &["--", "echo", "from-image"]);
+    }
+
+    #[test]
+    fn test_run_errors_when_rootfs_readonly_but_overlay_unavailable() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let log_path = tempdir.path().join("args.log");
+        // bwrap whose --help output does NOT contain --overlay-src
+        let bwrap = write_fake_bwrap(tempdir.path(), &log_path, false, 0);
+        let rootfs = tempdir.path().join("rootfs");
+        fs::create_dir_all(&rootfs).unwrap();
+
+        let err = run(
+            &rootfs,
+            &bonk_common::ContainerConfig {
+                cmd: vec!["echo".into()],
+                ..bonk_common::ContainerConfig::default()
+            },
+            &[],
+            &[],
+            Some(&bwrap),
+            false,
+            true, // rootfs_readonly = true
+        )
+        .unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("overlay"),
+            "expected 'overlay' in error, got: {msg}"
+        );
     }
 }

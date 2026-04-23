@@ -10,7 +10,7 @@ use which::which;
 /// squashfs was mounted (rootfs is read-only), `false` if extracted.
 ///
 /// On mount: `sqfs_path` is kept (the kernel holds a reference to it).
-/// On extraction: `sqfs_path` is removed after successful extraction.
+/// On extraction: `sqfs_path` isremoved after successful extraction.
 pub fn mount_or_extract(
     payload: &[u8],
     sqfs_path: &Path,

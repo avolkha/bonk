@@ -2,6 +2,7 @@ mod mount;
 mod runtime;
 
 use anyhow::{Context, Result, bail};
+use std::os::unix::fs::MetadataExt;
 
 use runtime::VolumeMount;
 use std::collections::hash_map::DefaultHasher;
@@ -135,13 +136,9 @@ fn main() -> Result<()> {
     // the invoking user (SUDO_UID/SUDO_GID) so unprivileged runs can write
     // tool binaries there. The squashfs mountpoint itself stays root-owned.
     if do_mount_only {
-        // Validate cache_dir is not a pre-placed symlink before operating as root.
-        if cache_dir.exists() && cache_dir.symlink_metadata()?.file_type().is_symlink() {
-            anyhow::bail!(
-                "cache dir {} is a symlink — refusing to operate as root",
-                cache_dir.display()
-            );
-        }
+        // Atomically create or validate cache_dir before writing as root.
+        // Prevents TOCTOU symlink attacks under the world-writable /tmp.
+        init_cache_dir_as_root(&cache_dir)?;
         let bin_dir = cache_dir.join("bin");
         std::fs::create_dir_all(&bin_dir).context("failed to create bin dir")?;
         std::fs::create_dir_all(&rootfs_path).context("failed to create rootfs mountpoint")?;
@@ -290,4 +287,36 @@ fn set_executable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
         .with_context(|| format!("failed to set permissions on {}", path.display()))
+}
+
+/// Atomically create `dir` for use as root, or validate that an existing
+/// directory is safe (real dir, owned by root). Closes the TOCTOU window
+/// from a pre-placed symlink causing root to write to arbitrary locations.
+fn init_cache_dir_as_root(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::create_dir(dir) {
+        Ok(()) => {
+            // Freshly created — set strict perms
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))
+                .context("failed to set cache dir permissions")?;
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Already exists — validate it is a real root-owned directory
+            let meta = dir.symlink_metadata().context("failed to stat cache dir")?;
+            anyhow::ensure!(
+                meta.file_type().is_dir(),
+                "cache path {} is not a directory (possible symlink attack)",
+                dir.display()
+            );
+            anyhow::ensure!(
+                meta.uid() == 0,
+                "cache dir {} is not owned by root (uid={}) — refusing to operate as root",
+                dir.display(),
+                meta.uid()
+            );
+            Ok(())
+        }
+        Err(e) => Err(e).with_context(|| format!("failed to create cache dir {}", dir.display())),
+    }
 }

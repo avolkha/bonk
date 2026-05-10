@@ -127,7 +127,35 @@ Key points:
 
 For volume specs, `splitn(3, ':')` ensures a host path like `/weird:name` in the guest side doesn't incorrectly split.
 
-### `std::fs::canonicalize`
+### Bundling many parameters into a struct
+
+When a function takes more than ~5 arguments, Clippy flags it with `too_many_arguments`. Rather
+than suppressing the lint with `#[allow(...)]`, extract the parameters into a named struct:
+
+```rust
+pub struct RunOpts<'a> {
+    pub rootfs: &'a std::path::Path,
+    pub config: &'a bonk_common::ContainerConfig,
+    pub extra_args: &'a [String],
+    pub volumes: &'a [VolumeMount],
+    pub runtime_env: &'a [String],
+    pub bwrap_path: Option<&'a std::path::Path>,
+    pub stdin_is_tty: bool,
+    pub rootfs_readonly: bool,
+}
+
+pub fn run(opts: RunOpts<'_>) -> Result<std::process::ExitStatus> {
+    let RunOpts { rootfs, config, extra_args, volumes, runtime_env,
+                  bwrap_path, stdin_is_tty, rootfs_readonly } = opts;
+    // ...
+}
+```
+
+This also makes call sites self-documenting — field names replace positional argument order.
+
+The lifetime `'a` on `RunOpts` is needed because it holds references: the compiler must know
+that all the borrowed data (`rootfs`, `config`, etc.) lives at least as long as the `RunOpts`
+value itself.
 
 ```rust
 let abs_path = std::fs::canonicalize("./relative/path")?;
@@ -136,6 +164,19 @@ let abs_path = std::fs::canonicalize("./relative/path")?;
 Resolves relative paths, symlinks, and `.` / `..` components to an absolute path. Returns `Err` if the path doesn't exist.
 
 Use this on the *host* side of a volume mount to ensure the path exists and is absolute before passing it to `bwrap`.
+
+### AppArmor and unprivileged user namespaces
+
+bwrap's rootless path (`--unshare-all`) requires the kernel to create a user namespace
+(`clone(CLONE_NEWUSER)`). Ubuntu 23.10+ and other distros with AppArmor 4.0 restrict
+this by default (`kernel.apparmor_restrict_unprivileged_userns=1`). Because the embedded
+bwrap binary is extracted to a temporary cache directory with no installed AppArmor profile,
+the syscall is denied and the container fails to start silently.
+
+The privileged `--mount` path avoids this entirely — it runs bwrap as root using
+`--unshare-ipc/pid/uts/cgroup` instead of `--unshare-all`, so no user namespace is created.
+On Ubuntu 24.04+ VMs, `sudo ./myapp --mount` followed by unprivileged `./myapp` is the
+reliable workaround.
 
 ### Building a `bwrap` command
 
@@ -343,25 +384,28 @@ In `src/runtime.rs`, define a `pub struct VolumeMount` with three fields:
 - `guest: String` — the path inside the container (must be absolute)
 - `read_only: bool`
 
-### Task 3 — `parse_volume`
+### Task 3 — `VolumeMount::parse`
 
-Implement:
+Implement an infallible associated function:
 
 ```
-pub fn parse_volume(spec: &str) -> Result<VolumeMount>
+impl VolumeMount {
+    pub fn parse(spec: &str) -> Self
+}
 ```
 
 Rules:
-1. Split `spec` with `splitn(3, ':')` into parts
-2. Bail if fewer than 2 parts, or if host/guest are empty
-3. Bail if the guest path doesn't start with `'/'`
-4. Canonicalize the host path with `fs::canonicalize` — bail if it doesn't exist
-5. The optional third part is `"ro"` for read-only; anything else (or absent) is read-write
-6. Return `Ok(VolumeMount { host, guest, read_only })`
+1. Split `spec` with `splitn(3, ':')` into at most three parts
+2. Take `parts[0]` as `host` and `parts[1]` as `guest` (default to `""` if absent)
+3. `read_only` is `true` iff `parts[2] == "ro"`
+4. Return `VolumeMount { host, guest, read_only }`
+
+This is intentionally forgiving — validation (e.g. checking that paths are non-empty
+and absolute) is handled at the call site in `main.rs`.
 
 ### Task 4 — Update the Lesson 09 arg parser
 
-In `bonk-runner/src/main.rs`, for each `-v` argument, call `runtime::parse_volume(spec)?` and push the result into the `volumes` vec.
+In `bonk-runner/src/main.rs`, for each `-v` argument, call `runtime::VolumeMount::parse(spec)` and push the result into the `volumes` vec.
 
 ### Task 5 — `resolve_command`
 
@@ -377,45 +421,41 @@ Implement the ENTRYPOINT + CMD logic from the table in the Concepts section. The
 
 ### Task 6 — `run`
 
-Implement:
+Implement using the `RunOpts` struct described in the Concepts section:
 
 ```
-pub fn run(
-    rootfs: &Path,
-    config: &ContainerConfig,
-    extra_args: &[String],
-    volumes: &[VolumeMount],
-    bwrap_bin: Option<&Path>,
-    stdin_is_tty: bool,
-    rootfs_readonly: bool,
-) -> Result<ExitStatus>
+pub fn run(opts: RunOpts<'_>) -> Result<ExitStatus>
 ```
 
-Build the `bwrap` command step by step:
-me::run not yet implemented")
-}
-1. Determine the `bwrap` binary: use `bwrap_bin` if provided (embedded tool), then check `BONK_BWRAP` env var, then fall back to `"bwrap"` from PATH
+Destructure `opts` at the top of the function body. Build the `bwrap` command step by step:
+
+1. Determine the `bwrap` binary: use `bwrap_path` if provided (embedded tool), then check `BONK_BWRAP` env var, then fall back to `which::which("bwrap")` from PATH
 2. Probe for bwrap overlay support: run `bwrap --help` and check whether the output contains `"--overlay-src"`. This avoids a live mount probe (which can fail with `EINVAL` on some kernels due to `userxattr`). If `rootfs_readonly` is `true` and overlay is not available, bail with a clear error.
 3. Overlay mode: `--overlay-src rootfs / --tmp-overlay /` — read-only lower layer + disposable upper
 4. Fallback bind mode (when not `rootfs_readonly` and overlay unavailable): `--bind rootfs /`
 5. `--dev /dev`, `--proc /proc`, `--tmpfs /tmp`, `--tmpfs /run`
-6. For each volume: `--bind host guest` or `--ro-bind host guest`
-7. **`--clearenv` must come before any `--setenv`** — bwrap processes args left-to-right; if `--clearenv` comes after `--setenv`, it wipes the vars you just set
-8. For each `KEY=VALUE` in `config.env`: `--setenv KEY VALUE`
-9. Pass through `TERM` from the host: `--setenv TERM <value-of-TERM>`
-10. **Namespace and UID handling (root-aware):**
-    - Detect if running as root: `unsafe { libc::getuid() } == 0`
-    - If **rootless**: `--unshare-all --share-net --uid 0 --gid 0`
-    - If **root**: `--unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup` (no `--unshare-user`, no `--uid`/`--gid` — already UID 0)
-11. `--hostname bonk`
-12. `--ro-bind /etc/resolv.conf /etc/resolv.conf` (for DNS)
+6. `--hostname bonk`, `--ro-bind /etc/resolv.conf /etc/resolv.conf`
+7. **Namespace and UID handling (root-aware):** detect with `unsafe { libc::getuid() } == 0`
+   - If **rootless**: `--unshare-all --share-net --uid 0 --gid 0`
+   - If **root**: `--unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup`
+8. For each volume: `--bind host guest` or `--ro-bind host guest`
+9. **`--clearenv` must come before any `--setenv`** — bwrap processes args left-to-right
+10. For each `KEY=VALUE` in `config.env`: `--setenv KEY VALUE` (split on first `=`)
+11. Pass through `TERM` from the host: `--setenv TERM <value>`
+12. For each `KEY=VALUE` in `runtime_env`: `--setenv KEY VALUE` — these come **after** image vars so they override image defaults
 13. Only add `--new-session` if `stdin_is_tty` is `true`
 14. `--chdir <config.working_dir>`
-15. `--` followed by `resolve_command(config, extra_args)`
+15. `--` followed by `resolve_cmd(config, extra_args)?`
 
-Run with `.status()?` and return `Ok(status)`.
+Run with `.status()` and return `Ok(status)`.
 
 ### Task 7 — End-to-end test
+
+> **AppArmor note:** On Ubuntu 23.10+ and other distros with AppArmor 4.0, unprivileged user
+> namespaces are restricted by default. The embedded bwrap binary has no AppArmor profile, so
+> `./myapp` will fail silently on affected VMs. Run `sudo ./myapp --mount` once to set up the
+> kernel loop-mount (which bypasses user namespaces), then all subsequent `./myapp` invocations
+> run unprivileged without hitting the restriction.
 
 ```bash
 # Install build prerequisites if needed

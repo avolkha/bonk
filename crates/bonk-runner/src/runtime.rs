@@ -40,15 +40,28 @@ fn resolve_cmd(
     }
 }
 
-pub fn run(
-    rootfs: &std::path::Path,
-    config: &bonk_common::ContainerConfig,
-    extra_args: &[String],
-    volumes: &[VolumeMount],
-    bwrap_path: Option<&std::path::Path>,
-    stdin_is_tty: bool,
-    rootfs_readonly: bool,
-) -> Result<std::process::ExitStatus> {
+pub struct RunOpts<'a> {
+    pub rootfs: &'a std::path::Path,
+    pub config: &'a bonk_common::ContainerConfig,
+    pub extra_args: &'a [String],
+    pub volumes: &'a [VolumeMount],
+    pub runtime_env: &'a [String],
+    pub bwrap_path: Option<&'a std::path::Path>,
+    pub stdin_is_tty: bool,
+    pub rootfs_readonly: bool,
+}
+
+pub fn run(opts: RunOpts<'_>) -> Result<std::process::ExitStatus> {
+    let RunOpts {
+        rootfs,
+        config,
+        extra_args,
+        volumes,
+        runtime_env,
+        bwrap_path,
+        stdin_is_tty,
+        rootfs_readonly,
+    } = opts;
     let bwrap_bin = match bwrap_path {
         Some(path) => path.to_path_buf(),
         None => {
@@ -132,6 +145,10 @@ pub fn run(
     }
     if let Ok(term) = std::env::var("TERM") {
         cmd.arg("--setenv").arg("TERM").arg(term);
+    }
+    for env in runtime_env {
+        let (key, value) = env.split_once('=').unwrap_or((env.as_str(), ""));
+        cmd.arg("--setenv").arg(key).arg(value);
     }
     if stdin_is_tty {
         cmd.arg("--new-session");
@@ -260,15 +277,16 @@ mod tests {
         fs::create_dir_all(&rootfs).unwrap();
         let volumes = vec![VolumeMount::parse("/tmp/host:/guest:ro")];
 
-        let status = run(
-            &rootfs,
-            &make_config(),
-            &["echo".into(), "hi".into()],
-            &volumes,
-            Some(&bwrap),
-            true,
-            false,
-        )
+        let status = run(RunOpts {
+            rootfs: &rootfs,
+            config: &make_config(),
+            extra_args: &["echo".into(), "hi".into()],
+            volumes: &volumes,
+            runtime_env: &[],
+            bwrap_path: Some(&bwrap),
+            stdin_is_tty: true,
+            rootfs_readonly: false,
+        })
         .unwrap();
 
         assert_eq!(status.code(), Some(7));
@@ -304,18 +322,19 @@ mod tests {
         let rootfs = tempdir.path().join("rootfs");
         fs::create_dir_all(&rootfs).unwrap();
 
-        let status = run(
-            &rootfs,
-            &bonk_common::ContainerConfig {
+        let status = run(RunOpts {
+            rootfs: &rootfs,
+            config: &bonk_common::ContainerConfig {
                 cmd: vec!["echo".into(), "from-image".into()],
                 ..bonk_common::ContainerConfig::default()
             },
-            &[],
-            &[],
-            Some(&bwrap),
-            false,
-            false,
-        )
+            extra_args: &[],
+            volumes: &[],
+            runtime_env: &[],
+            bwrap_path: Some(&bwrap),
+            stdin_is_tty: false,
+            rootfs_readonly: false,
+        })
         .unwrap();
 
         assert!(status.success());
@@ -335,24 +354,70 @@ mod tests {
         let rootfs = tempdir.path().join("rootfs");
         fs::create_dir_all(&rootfs).unwrap();
 
-        let err = run(
-            &rootfs,
-            &bonk_common::ContainerConfig {
+        let err = run(RunOpts {
+            rootfs: &rootfs,
+            config: &bonk_common::ContainerConfig {
                 cmd: vec!["echo".into()],
                 ..bonk_common::ContainerConfig::default()
             },
-            &[],
-            &[],
-            Some(&bwrap),
-            false,
-            true, // rootfs_readonly = true
-        )
+            extra_args: &[],
+            volumes: &[],
+            runtime_env: &[],
+            bwrap_path: Some(&bwrap),
+            stdin_is_tty: false,
+            rootfs_readonly: true,
+        })
         .unwrap_err();
 
         let msg = format!("{err:#}");
         assert!(
             msg.contains("overlay"),
             "expected 'overlay' in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_run_runtime_env_appended_after_image_vars_and_overrides() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let log_path = tempdir.path().join("args.log");
+        let bwrap = write_fake_bwrap(tempdir.path(), &log_path, true, 0);
+        let rootfs = tempdir.path().join("rootfs");
+        fs::create_dir_all(&rootfs).unwrap();
+
+        // image has KEY=from-image; runtime overrides it and adds NEW=injected
+        let runtime_env = vec!["KEY=from-runtime".to_string(), "NEW=injected".to_string()];
+
+        let status = run(RunOpts {
+            rootfs: &rootfs,
+            config: &make_config(),
+            extra_args: &[],
+            volumes: &[],
+            runtime_env: &runtime_env,
+            bwrap_path: Some(&bwrap),
+            stdin_is_tty: false,
+            rootfs_readonly: false,
+        })
+        .unwrap();
+
+        assert!(status.success());
+        let args = read_args(&log_path);
+
+        // runtime env vars must be present
+        assert_contains_sequence(&args, &["--setenv", "KEY", "from-runtime"]);
+        assert_contains_sequence(&args, &["--setenv", "NEW", "injected"]);
+
+        // runtime setenv for KEY must appear after the image's setenv for KEY
+        let image_pos = args
+            .windows(3)
+            .position(|w| w[0] == "--setenv" && w[1] == "KEY" && w[2] == "value")
+            .expect("image --setenv KEY value not found");
+        let runtime_pos = args
+            .windows(3)
+            .position(|w| w[0] == "--setenv" && w[1] == "KEY" && w[2] == "from-runtime")
+            .expect("runtime --setenv KEY from-runtime not found");
+        assert!(
+            runtime_pos > image_pos,
+            "runtime KEY override must come after image KEY (image@{image_pos}, runtime@{runtime_pos})"
         );
     }
 }

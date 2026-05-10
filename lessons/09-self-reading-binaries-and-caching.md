@@ -119,6 +119,7 @@ let args: Vec<String> = std::env::args().collect();
 // args[0] is the program name, args[1..] are the user's arguments
 
 let mut volumes: Vec<VolumeMount> = Vec::new();
+let mut runtime_env: Vec<String> = Vec::new();
 let mut extra_args: Vec<String> = Vec::new();
 let mut quiet = false;
 let mut saw_sep = false;   // true once we see "--"
@@ -138,6 +139,12 @@ while i < args.len() {
     } else if arg.starts_with("-v") {
         // inline: "-v/host:/guest"
         let spec = &arg[2..];  // strip the "-v" prefix
+    } else if arg == "-e" || arg == "--env" {
+        i += 1;
+        // args[i] is "KEY=VALUE"
+        runtime_env.push(args[i].clone());
+    } else if let Some(kv) = arg.strip_prefix("--env=") {
+        runtime_env.push(kv.to_string());
     } else {
         extra_args.push(arg.clone());
         saw_sep = true;  // first non-flag arg: everything after is CMD
@@ -201,6 +208,7 @@ In `bonk-runner/src/main.rs`, declare two modules: `mod mount;` and `mod runtime
 If the first argument is `"--help"` or `"-h"`, print a usage message to stdout and exit with code 0. The usage message should explain:
 
 - That this is a bonk-generated container binary
+- The `-e, --env KEY=VALUE` flag to set environment variables inside the container (repeatable, appended after image vars, overrides image defaults; no host vars leak implicitly)
 - The `-v HOST:GUEST[:ro]` flag for volume mounts
 - The `-q` / `--quiet` flag to suppress progress output
 - The `--` separator for CMD arguments
@@ -212,6 +220,7 @@ Implement the argument parsing loop described in the concepts section. You'll ne
 
 Collect:
 - `volumes: Vec<VolumeMount>` — one per `-v` flag
+- `runtime_env: Vec<String>` — one `KEY=VALUE` string per `-e`/`--env` flag
 - `extra_args: Vec<String>` — CMD override arguments
 - `quiet: bool` — set to `true` if `-q` or `--quiet` is given
 - `stdin_is_tty: bool` — detect with `std::io::stdin().is_terminal()`
@@ -281,14 +290,22 @@ paths to the bwrap and unsquashfs binaries.
 
 ### Task 7 — Launch
 
-Call `runtime::run(&rootfs_path, &config, &extra_args, &volumes, bwrap_path.as_deref(), stdin_is_tty, rootfs_readonly)` — this returns
-a `Result<std::process::ExitStatus>`. `rootfs_readonly` is `true` when the marker was `"mount"` (squashfs loop-mounted);
-bwrap must use an overlay filesystem in that case.
+Call `runtime::run` with a `RunOpts` struct — this returns a `Result<std::process::ExitStatus>`.
+`rootfs_readonly` is `true` when the marker was `"mount"` (squashfs loop-mounted); bwrap must use an overlay filesystem in that case.
 
 No cleanup is needed (no FUSE daemon to unmount), so just exit with the code:
 
 ```rust
-let status = runtime::run(&rootfs_path, &config, &extra_args, &volumes, bwrap_path.as_deref(), stdin_is_tty, rootfs_readonly)?;
+let status = runtime::run(runtime::RunOpts {
+    rootfs: &rootfs_path,
+    config: &config,
+    extra_args: &extra_args,
+    volumes: &volumes,
+    runtime_env: &runtime_env,
+    bwrap_path: tools.bwrap.as_deref(),
+    stdin_is_tty,
+    rootfs_readonly,
+})?;
 std::process::exit(status.code().unwrap_or(1));
 ```
 

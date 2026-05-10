@@ -99,7 +99,7 @@ Both `bonk` and `bonk-runner` must be locatable — either in the same directory
 sudo apt install squashfs-tools
 ```
 
-**Target machine:** Linux with user namespaces enabled. That's it.
+**Target machine:** Linux kernel 3.8+. On Ubuntu 23.10+ and other distros with AppArmor 4.0, unprivileged user namespaces are restricted by default — see [AppArmor compatibility](#apparmor-compatibility) below.
 
 ---
 
@@ -116,6 +116,15 @@ bonk -o myapp my_image:latest
 ./alpine                    # launches default CMD
 ./alpine echo hello         # override CMD
 ./alpine --help             # show runner help
+```
+
+### Runtime environment variables
+
+Pass `-e KEY=VALUE` (repeatable) to inject environment variables into the container. These are appended after the image's own env vars and override any matching keys. No host environment variables leak in implicitly.
+
+```bash
+./myapp -e DEBUG=1 -e PORT=8080 -- node server.js
+./myapp -e HOME=/data -- bash
 ```
 
 ### Volume mounts
@@ -140,7 +149,10 @@ Following Docker semantics, extra args replace `CMD` while `ENTRYPOINT` is prese
 
 | Flag | Effect |
 |------|--------|
+| `-e, --env KEY=VALUE` | Set an environment variable inside the container. Appended after image vars; overrides image defaults. Repeatable. No host env vars leak implicitly. |
+| `-v, --volume HOST:GUEST[:ro]` | Bind-mount a host path. Append `:ro` for read-only. Repeatable. |
 | `--mount` | **Privileged first-run setup.** Writes the `.sqfs` file, kernel loop-mounts it at `rootfs/`, then chowns `bin/`, `rootfs.sqfs`, the marker file, and the cache dir itself back to the invoking user (`SUDO_UID:SUDO_GID`) so unprivileged runs can access the cache. The squashfs mountpoint stays root-owned. Must be run with `sudo` or as root. Subsequent plain invocations skip this step automatically. |
+| `-q, --quiet` | Suppress progress output. |
 
 ### Build-time flags
 
@@ -150,12 +162,13 @@ Following Docker semantics, extra args replace `CMD` while `ENTRYPOINT` is prese
 | `--bwrap-path <path>` | Embed this specific bwrap binary |
 | `--unsquashfs-path <path>` | Embed this specific unsquashfs binary |
 
-### Environment variables
+### Runtime environment variables (host → build tool)
 
 | Variable | Effect |
 |----------|--------|
 | `BONK_TOOLS_DIR=<dir>` | Directory containing `bwrap` and `unsquashfs` to embed |
 | `BONK_RUNNER=<path>` | Path to the `bonk-runner` binary to embed |
+| `BONK_BWRAP=<path>` | Override the embedded bwrap binary at runtime (set on the target machine, not at build time) |
 
 When `--bwrap-path` / `--unsquashfs-path` are omitted, `bonk` searches in order:
 1. `BONK_TOOLS_DIR` environment variable
@@ -239,6 +252,49 @@ This repo is structured as a guided Rust curriculum. Each lesson introduces lang
 - **Cache in `/tmp`** — cache is lost on reboot; first run after reboot re-extracts or re-mounts
 - **Privileged mount requires `sudo`** — the kernel squashfs loop-mount path needs root; without it bonk falls back to `unsquashfs` extraction
 - **Disk usage (extraction path)** — rootfs cache uses disk space equal to the uncompressed image; the mount path only stores the `.sqfs` file
+
+---
+
+## AppArmor compatibility
+
+bonk's rootless code path depends on **unprivileged user namespaces** (`clone(CLONE_NEWUSER)`). Ubuntu 23.10+ and other distros running AppArmor 4.0 restrict this by default (`kernel.apparmor_restrict_unprivileged_userns=1`). Because the embedded `bwrap` binary is extracted to a temporary cache directory with no installed AppArmor profile, the syscall is denied and `./myapp` fails silently.
+
+### Affected environments
+
+| Setup | Result |
+|---|---|
+| Non-root, Ubuntu 24.04+ VM (default AppArmor) | **Broken** — user namespace creation denied |
+| Non-root, older Ubuntu / AppArmor disabled | Works |
+| Root (`sudo --mount` path) | Works — bypasses user namespaces entirely |
+| Non-root, system `bwrap` with AppArmor profile | Works — see Option C below |
+
+### Workarounds
+
+**Option A — use the privileged mount path (recommended for Ubuntu VMs):**
+
+```bash
+sudo ./myapp --mount   # one-time setup per reboot; chowns cache back to you
+./myapp                # all subsequent runs are unprivileged at full speed
+```
+
+The loop-mount path runs `bwrap` as root using `--unshare-ipc/pid/uts/cgroup` rather than `--unshare-all`, so AppArmor's user-namespace restriction does not apply.
+
+**Option B — allow unprivileged user namespaces system-wide:**
+
+```bash
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+# Persist across reboots:
+echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/99-userns.conf
+```
+
+**Option C — use the system bwrap instead of the embedded one:**
+
+If `bwrap` is installed via the system package manager, its distro-provided AppArmor profile grants it the `userns` capability:
+
+```bash
+sudo apt install bubblewrap
+BONK_BWRAP=/usr/bin/bwrap ./myapp
+```
 
 ---
 

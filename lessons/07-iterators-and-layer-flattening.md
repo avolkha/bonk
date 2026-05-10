@@ -157,10 +157,10 @@ If the filename starts with `".wh."` but is not the opaque whiteout:
 ### Task 5 — Handle normal entries
 
 For any entry that is not a whiteout file:
-- Call `entry.unpack_in(rootfs)?`
+- Call `entry.unpack_in(rootfs)`
 - If this returns an `Err`, print a warning with `eprintln!` but don't propagate the error — some entries in real Docker images can legitimately fail to unpack (e.g. special device files that require root)
 
-> **Hint:** Use `if let Err(e) = entry.unpack_in(rootfs) { eprintln!("warning: ..."); }` to handle non-fatal errors.
+> **Hint:** Collapse the `else` branch directly into `else if let Err(e) = entry.unpack_in(rootfs) { eprintln!("warning: ..."); }` rather than writing `else { if let Err(e) = ... { } }`. Clippy flags the nested form as `collapsible_else_if` and will deny it with `-D warnings`.
 
 ### Task 6 — Wire it up
 

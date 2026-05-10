@@ -173,10 +173,8 @@ fn apply_layer(layer_tar: Box<dyn Read>, rootfs: &Path) -> Result<()> {
             apply_opaque_whiteout(rootfs, &path)?;
         } else if filename.starts_with(".wh.") {
             apply_regular_whiteout(rootfs, &path)?;
-        } else {
-            if let Err(e) = entry.unpack_in(rootfs) {
-                eprintln!("warning: failed to extract {}: {}", path.display(), e);
-            }
+        } else if let Err(e) = entry.unpack_in(rootfs) {
+            eprintln!("warning: failed to extract {}: {}", path.display(), e);
         }
     }
     Ok(())

@@ -237,16 +237,16 @@ fn main() -> Result<()> {
     };
 
     let tools = extract_embedded_tools(&footer, &exe_data, &cache_dir)?;
-    let status = runtime::run(
-        &rootfs_path,
-        &config,
-        &extra_args,
-        &volumes,
-        &runtime_env,
-        tools.bwrap.as_deref(),
+    let status = runtime::run(runtime::RunOpts {
+        rootfs: &rootfs_path,
+        config: &config,
+        extra_args: &extra_args,
+        volumes: &volumes,
+        runtime_env: &runtime_env,
+        bwrap_path: tools.bwrap.as_deref(),
         stdin_is_tty,
         rootfs_readonly,
-    )?;
+    })?;
     std::process::exit(status.code().unwrap_or(1));
 }
 

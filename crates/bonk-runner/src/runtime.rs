@@ -40,16 +40,28 @@ fn resolve_cmd(
     }
 }
 
-pub fn run(
-    rootfs: &std::path::Path,
-    config: &bonk_common::ContainerConfig,
-    extra_args: &[String],
-    volumes: &[VolumeMount],
-    runtime_env: &[String],
-    bwrap_path: Option<&std::path::Path>,
-    stdin_is_tty: bool,
-    rootfs_readonly: bool,
-) -> Result<std::process::ExitStatus> {
+pub struct RunOpts<'a> {
+    pub rootfs: &'a std::path::Path,
+    pub config: &'a bonk_common::ContainerConfig,
+    pub extra_args: &'a [String],
+    pub volumes: &'a [VolumeMount],
+    pub runtime_env: &'a [String],
+    pub bwrap_path: Option<&'a std::path::Path>,
+    pub stdin_is_tty: bool,
+    pub rootfs_readonly: bool,
+}
+
+pub fn run(opts: RunOpts<'_>) -> Result<std::process::ExitStatus> {
+    let RunOpts {
+        rootfs,
+        config,
+        extra_args,
+        volumes,
+        runtime_env,
+        bwrap_path,
+        stdin_is_tty,
+        rootfs_readonly,
+    } = opts;
     let bwrap_bin = match bwrap_path {
         Some(path) => path.to_path_buf(),
         None => {
@@ -265,16 +277,16 @@ mod tests {
         fs::create_dir_all(&rootfs).unwrap();
         let volumes = vec![VolumeMount::parse("/tmp/host:/guest:ro")];
 
-        let status = run(
-            &rootfs,
-            &make_config(),
-            &["echo".into(), "hi".into()],
-            &volumes,
-            &[],
-            Some(&bwrap),
-            true,
-            false,
-        )
+        let status = run(RunOpts {
+            rootfs: &rootfs,
+            config: &make_config(),
+            extra_args: &["echo".into(), "hi".into()],
+            volumes: &volumes,
+            runtime_env: &[],
+            bwrap_path: Some(&bwrap),
+            stdin_is_tty: true,
+            rootfs_readonly: false,
+        })
         .unwrap();
 
         assert_eq!(status.code(), Some(7));
@@ -310,19 +322,19 @@ mod tests {
         let rootfs = tempdir.path().join("rootfs");
         fs::create_dir_all(&rootfs).unwrap();
 
-        let status = run(
-            &rootfs,
-            &bonk_common::ContainerConfig {
+        let status = run(RunOpts {
+            rootfs: &rootfs,
+            config: &bonk_common::ContainerConfig {
                 cmd: vec!["echo".into(), "from-image".into()],
                 ..bonk_common::ContainerConfig::default()
             },
-            &[],
-            &[],
-            &[],
-            Some(&bwrap),
-            false,
-            false,
-        )
+            extra_args: &[],
+            volumes: &[],
+            runtime_env: &[],
+            bwrap_path: Some(&bwrap),
+            stdin_is_tty: false,
+            rootfs_readonly: false,
+        })
         .unwrap();
 
         assert!(status.success());
@@ -342,19 +354,19 @@ mod tests {
         let rootfs = tempdir.path().join("rootfs");
         fs::create_dir_all(&rootfs).unwrap();
 
-        let err = run(
-            &rootfs,
-            &bonk_common::ContainerConfig {
+        let err = run(RunOpts {
+            rootfs: &rootfs,
+            config: &bonk_common::ContainerConfig {
                 cmd: vec!["echo".into()],
                 ..bonk_common::ContainerConfig::default()
             },
-            &[],
-            &[],
-            &[],
-            Some(&bwrap),
-            false,
-            true, // rootfs_readonly = true
-        )
+            extra_args: &[],
+            volumes: &[],
+            runtime_env: &[],
+            bwrap_path: Some(&bwrap),
+            stdin_is_tty: false,
+            rootfs_readonly: true,
+        })
         .unwrap_err();
 
         let msg = format!("{err:#}");
@@ -375,16 +387,16 @@ mod tests {
         // image has KEY=from-image; runtime overrides it and adds NEW=injected
         let runtime_env = vec!["KEY=from-runtime".to_string(), "NEW=injected".to_string()];
 
-        let status = run(
-            &rootfs,
-            &make_config(),
-            &[],
-            &[],
-            &runtime_env,
-            Some(&bwrap),
-            false,
-            false,
-        )
+        let status = run(RunOpts {
+            rootfs: &rootfs,
+            config: &make_config(),
+            extra_args: &[],
+            volumes: &[],
+            runtime_env: &runtime_env,
+            bwrap_path: Some(&bwrap),
+            stdin_is_tty: false,
+            rootfs_readonly: false,
+        })
         .unwrap();
 
         assert!(status.success());

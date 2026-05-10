@@ -105,7 +105,8 @@ OUT=$("$ALPINE" -e MY_VAR=hello-from-runtime sh -c 'echo $MY_VAR' 2>/dev/null) |
 assert_contains "-e injects new env var" "hello-from-runtime" "$OUT"
 
 # -e / --env: override an image-baked variable (PATH is always set by alpine)
-OUT=$("$ALPINE" -e PATH=/overridden sh -c 'echo $PATH' 2>/dev/null) || true
+# Use absolute path for the shell so overriding PATH doesn't prevent exec
+OUT=$("$ALPINE" -e PATH=/overridden /bin/sh -c 'echo $PATH' 2>/dev/null) || true
 assert_contains "-e overrides image env var" "/overridden" "$OUT"
 
 # --help doesn't crash

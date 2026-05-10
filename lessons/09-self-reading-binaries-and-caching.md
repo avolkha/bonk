@@ -254,6 +254,7 @@ Define the cache layout:
 ```
 
 The `--mount` flag enables a privileged first-run setup path (requires root / `sudo`):
+- **Before any writes**, call `mount::init_cache_dir_as_root(&cache_dir)?` — this atomically creates or validates the cache dir, protecting against TOCTOU symlink attacks in the world-writable `/tmp`. (Implemented in Lesson 10.)
 - Write the `.sqfs` to the cache dir, create `rootfs/` and `bin/`
 - Call `mount::try_squashfs_mount(&sqfs_path, &rootfs_path)` to kernel loop-mount it
 - Write marker `"mount"`

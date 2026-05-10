@@ -69,6 +69,47 @@ an overlay filesystem: the extracted rootfs is the read-only lower layer, and
 writes go to a temporary upper layer that is discarded when the container exits.
 This gives each invocation a clean slate — the image layer stays immutable.
 
+### Securing world-writable paths: the TOCTOU problem
+
+The cache directory lives under `/tmp`, which is world-writable. Any unprivileged
+process can create `/tmp/bonk-<hash>` as a symlink pointing anywhere — e.g.
+`/etc/passwd` — before `bonk --mount` runs. If the privileged code blindly calls
+`std::fs::create_dir_all` or `std::fs::write`, it follows the symlink and
+overwrites the target as root. This is a *time-of-check / time-of-use* (TOCTOU)
+race.
+
+The fix is to create the directory atomically and, if it already exists, validate
+it is a real directory owned by root before writing anything into it:
+
+```rust
+pub fn init_cache_dir_as_root(dir: &Path) -> Result<()> {
+    match std::fs::create_dir(dir) {
+        Ok(()) => {
+            // Fresh creation — set strict permissions
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))?;
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Already exists — verify it is a real root-owned directory
+            // Use symlink_metadata (not metadata) so we never follow symlinks
+            let meta = dir.symlink_metadata()?;
+            anyhow::ensure!(meta.file_type().is_dir(),
+                "cache path {} is not a directory (possible symlink attack)", dir.display());
+            anyhow::ensure!(meta.uid() == 0,
+                "cache dir {} is not owned by root (uid={})", dir.display(), meta.uid());
+            Ok(())
+        }
+        Err(e) => Err(e).with_context(|| format!("failed to create {}", dir.display())),
+    }
+}
+```
+
+Key points:
+- `std::fs::create_dir` (not `create_dir_all`) atomically creates a single directory and fails if it already exists — there is no TOCTOU window between "check if exists" and "create"
+- `symlink_metadata` (not `metadata`) returns information about the path itself, not its target — so a symlink shows as `is_symlink()` rather than `is_dir()`
+- `MetadataExt::uid()` checks the POSIX owner — only directories created by root have `uid == 0`
+- This function belongs in `mount.rs` and is called from the `--mount` path in `main.rs` before any writes into the cache dir
+
 ### `splitn` — splitting with a limit
 
 `str::split` splits on every occurrence of a delimiter. `splitn(n, delim)` stops after at most `n` parts:
@@ -215,6 +256,21 @@ piped input.
 
 ## Tasks
 
+### Task 0 — `init_cache_dir_as_root`
+
+In `src/mount.rs`, implement the security-critical helper described in the Concepts section:
+
+```
+pub fn init_cache_dir_as_root(dir: &Path) -> Result<()>
+```
+
+- Use `std::fs::create_dir` (not `create_dir_all`) for atomic creation
+- On `AlreadyExists`: call `dir.symlink_metadata()` and verify `is_dir()` and `uid() == 0`
+- On fresh creation: set permissions to `0o755`
+- Add `use std::os::unix::fs::{MetadataExt, PermissionsExt}` for `uid()` and `from_mode`
+
+This function is called from `main.rs` at the top of the `--mount` path, before any writes into the cache dir.
+
 ### Task 1 — `mount_or_extract`, `try_squashfs_mount`, `is_squashfs_mounted`
 
 In `src/mount.rs`, implement three public functions:
@@ -249,6 +305,35 @@ Parse `/proc/mounts` and return `true` if any line has `mountpoint == path && fs
 
 Also implement the private helper `extract_via_unsquashfs(sqfs_path, dest, unsquashfs)` that runs
 `<unsquashfs> -f -d <dest> <sqfs_path>` with stdout/stderr suppressed.
+
+### Task 1b — Unit tests for `mount.rs`
+
+Add a `#[cfg(test)]` module to `mount.rs` with two tests. Because you can't trigger a real kernel squashfs mount in a test environment, fake the `unsquashfs` binary with a small shell script:
+
+```rust
+fn fake_unsquashfs(dir: &Path, script_body: &str) -> std::path::PathBuf {
+    let script = dir.join("fake-unsquashfs.sh");
+    fs::write(&script, format!("#!/bin/sh\nset -eu\n{script_body}\n")).unwrap();
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).unwrap();
+    script
+}
+```
+
+**Test 1 — extraction happy path:**
+- Create a `tempdir`; define `sqfs_path` and `dest` inside it
+- Pass a fake unsquashfs that writes a sentinel file to its `$3` arg (the dest dir)
+- Assert `mount_or_extract` returns `Ok(false)` (not mounted)
+- Assert the sentinel file exists
+- Assert `sqfs_path` was deleted after extraction
+
+**Test 2 — extraction failure propagates:**
+- Pass a fake unsquashfs that exits with a non-zero code
+- Assert the returned `Err` contains `"unsquashfs failed with status"`
+
+These tests verify the fallback path end-to-end without requiring root or a real squashfs image.
+Add `tempfile = "3"` to `[dev-dependencies]` in `crates/bonk-runner/Cargo.toml`.
 
 ### Task 2 — `VolumeMount` struct
 
@@ -395,6 +480,7 @@ This is not about being identical — it's about understanding the tradeoffs.
 3. If the user passes `./alpine -v ./data:/data -- bash -c "ls /data"`, trace through the argument parser and `runtime.rs` step by step. What exactly does bwrap receive?
 4. Why do we skip `--unshare-user` when running as root? What would happen if we kept it?
 5. Why is `--new-session` only safe when stdin is a terminal? What goes wrong with piped input?
+6. Why must `init_cache_dir_as_root` use `symlink_metadata` rather than `metadata`? What attack does this prevent? Why is `std::fs::create_dir` (not `create_dir_all`) the right call here?
 
 ---
 

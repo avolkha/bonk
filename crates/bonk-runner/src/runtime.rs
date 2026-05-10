@@ -45,6 +45,7 @@ pub fn run(
     config: &bonk_common::ContainerConfig,
     extra_args: &[String],
     volumes: &[VolumeMount],
+    runtime_env: &[String],
     bwrap_path: Option<&std::path::Path>,
     stdin_is_tty: bool,
     rootfs_readonly: bool,
@@ -132,6 +133,10 @@ pub fn run(
     }
     if let Ok(term) = std::env::var("TERM") {
         cmd.arg("--setenv").arg("TERM").arg(term);
+    }
+    for env in runtime_env {
+        let (key, value) = env.split_once('=').unwrap_or((env.as_str(), ""));
+        cmd.arg("--setenv").arg(key).arg(value);
     }
     if stdin_is_tty {
         cmd.arg("--new-session");
@@ -265,6 +270,7 @@ mod tests {
             &make_config(),
             &["echo".into(), "hi".into()],
             &volumes,
+            &[],
             Some(&bwrap),
             true,
             false,
@@ -312,6 +318,7 @@ mod tests {
             },
             &[],
             &[],
+            &[],
             Some(&bwrap),
             false,
             false,
@@ -343,6 +350,7 @@ mod tests {
             },
             &[],
             &[],
+            &[],
             Some(&bwrap),
             false,
             true, // rootfs_readonly = true
@@ -353,6 +361,51 @@ mod tests {
         assert!(
             msg.contains("overlay"),
             "expected 'overlay' in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_run_runtime_env_appended_after_image_vars_and_overrides() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let log_path = tempdir.path().join("args.log");
+        let bwrap = write_fake_bwrap(tempdir.path(), &log_path, true, 0);
+        let rootfs = tempdir.path().join("rootfs");
+        fs::create_dir_all(&rootfs).unwrap();
+
+        // image has KEY=from-image; runtime overrides it and adds NEW=injected
+        let runtime_env = vec!["KEY=from-runtime".to_string(), "NEW=injected".to_string()];
+
+        let status = run(
+            &rootfs,
+            &make_config(),
+            &[],
+            &[],
+            &runtime_env,
+            Some(&bwrap),
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert!(status.success());
+        let args = read_args(&log_path);
+
+        // runtime env vars must be present
+        assert_contains_sequence(&args, &["--setenv", "KEY", "from-runtime"]);
+        assert_contains_sequence(&args, &["--setenv", "NEW", "injected"]);
+
+        // runtime setenv for KEY must appear after the image's setenv for KEY
+        let image_pos = args
+            .windows(3)
+            .position(|w| w[0] == "--setenv" && w[1] == "KEY" && w[2] == "value")
+            .expect("image --setenv KEY value not found");
+        let runtime_pos = args
+            .windows(3)
+            .position(|w| w[0] == "--setenv" && w[1] == "KEY" && w[2] == "from-runtime")
+            .expect("runtime --setenv KEY from-runtime not found");
+        assert!(
+            runtime_pos > image_pos,
+            "runtime KEY override must come after image KEY (image@{image_pos}, runtime@{runtime_pos})"
         );
     }
 }

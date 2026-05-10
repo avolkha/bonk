@@ -49,6 +49,9 @@ fn main() -> Result<()> {
         eprintln!("  {bin_name} [OPTIONS] [-- CMD [ARGS...]]");
         eprintln!();
         eprintln!("OPTIONS:");
+        eprintln!("  -e, --env KEY=VALUE            Set an environment variable inside the container.");
+        eprintln!("                                 Appended after image vars; overrides image defaults.");
+        eprintln!("                                 Repeatable. No host env vars leak implicitly.");
         eprintln!("  -v, --volume HOST:GUEST[:ro]   Bind-mount a host path into the container.");
         eprintln!("                                 Append :ro for a read-only mount. Repeatable.");
         eprintln!("  --mount                        Mount the embedded squashfs rootfs and exit.");
@@ -78,6 +81,7 @@ fn main() -> Result<()> {
 
     let mut volumes: Vec<VolumeMount> = Vec::new();
     let mut extra_args: Vec<String> = Vec::new();
+    let mut runtime_env: Vec<String> = Vec::new();
     let mut quiet = false;
     let mut do_mount_only = false;
     let mut saw_sep = false;
@@ -94,6 +98,13 @@ fn main() -> Result<()> {
             do_mount_only = true;
         } else if arg == "-q" || arg == "--quiet" {
             quiet = true;
+        } else if arg == "-e" || arg == "--env" {
+            i += 1;
+            if let Some(spec) = args.get(i) {
+                runtime_env.push(spec.clone());
+            }
+        } else if let Some(spec) = arg.strip_prefix("-e") {
+            runtime_env.push(spec.to_string());
         } else if arg == "-v" || arg == "--volume" {
             i += 1;
             if let Some(spec) = args.get(i) {
@@ -231,6 +242,7 @@ fn main() -> Result<()> {
         &config,
         &extra_args,
         &volumes,
+        &runtime_env,
         tools.bwrap.as_deref(),
         stdin_is_tty,
         rootfs_readonly,

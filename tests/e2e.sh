@@ -100,6 +100,14 @@ else
     echo "  SKIP: root execution (no passwordless sudo)"
 fi
 
+# -e / --env: inject a new variable at runtime
+OUT=$("$ALPINE" -e MY_VAR=hello-from-runtime sh -c 'echo $MY_VAR' 2>/dev/null) || true
+assert_contains "-e injects new env var" "hello-from-runtime" "$OUT"
+
+# -e / --env: override an image-baked variable (PATH is always set by alpine)
+OUT=$("$ALPINE" -e PATH=/overridden sh -c 'echo $PATH' 2>/dev/null) || true
+assert_contains "-e overrides image env var" "/overridden" "$OUT"
+
 # --help doesn't crash
 "$ALPINE" --help >/dev/null 2>&1 || true
 pass "--help exits cleanly"

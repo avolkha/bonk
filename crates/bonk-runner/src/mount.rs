@@ -1,6 +1,38 @@
 use anyhow::{Context, Result};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use which::which;
+
+/// Atomically create `dir` for use as root, or validate that an existing
+/// directory is safe (real dir, owned by root). Closes the TOCTOU window
+/// from a pre-placed symlink causing root to write to arbitrary locations.
+pub fn init_cache_dir_as_root(dir: &Path) -> Result<()> {
+    match std::fs::create_dir(dir) {
+        Ok(()) => {
+            // Freshly created — set strict perms
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))
+                .context("failed to set cache dir permissions")?;
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Already exists — validate it is a real root-owned directory
+            let meta = dir.symlink_metadata().context("failed to stat cache dir")?;
+            anyhow::ensure!(
+                meta.file_type().is_dir(),
+                "cache path {} is not a directory (possible symlink attack)",
+                dir.display()
+            );
+            anyhow::ensure!(
+                meta.uid() == 0,
+                "cache dir {} is not owned by root (uid={}) — refusing to operate as root",
+                dir.display(),
+                meta.uid()
+            );
+            Ok(())
+        }
+        Err(e) => Err(e).with_context(|| format!("failed to create cache dir {}", dir.display())),
+    }
+}
 
 /// Make the squashfs payload available at `dest`.
 ///

@@ -49,8 +49,12 @@ fn main() -> Result<()> {
         eprintln!("  {bin_name} [OPTIONS] [-- CMD [ARGS...]]");
         eprintln!();
         eprintln!("OPTIONS:");
-        eprintln!("  -e, --env KEY=VALUE            Set an environment variable inside the container.");
-        eprintln!("                                 Appended after image vars; overrides image defaults.");
+        eprintln!(
+            "  -e, --env KEY=VALUE            Set an environment variable inside the container."
+        );
+        eprintln!(
+            "                                 Appended after image vars; overrides image defaults."
+        );
         eprintln!("                                 Repeatable. No host env vars leak implicitly.");
         eprintln!("  -v, --volume HOST:GUEST[:ro]   Bind-mount a host path into the container.");
         eprintln!("                                 Append :ro for a read-only mount. Repeatable.");

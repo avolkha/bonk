@@ -60,7 +60,7 @@ Pre-built static binaries are available for every [GitHub Release](https://githu
 
 **x86_64 (Linux)**
 ```bash
-VERSION=v0.1.0
+VERSION=v0.2.0
 curl -fsSL https://github.com/avolkha/bonk/releases/download/${VERSION}/bonk-x86_64-unknown-linux-musl -o bonk
 curl -fsSL https://github.com/avolkha/bonk/releases/download/${VERSION}/bonk-runner-x86_64-unknown-linux-musl -o bonk-runner
 chmod +x bonk bonk-runner
@@ -69,7 +69,7 @@ sudo mv bonk bonk-runner /usr/local/bin/
 
 **ARM64 (Linux)**
 ```bash
-VERSION=v0.1.0
+VERSION=v0.2.0
 curl -fsSL https://github.com/avolkha/bonk/releases/download/${VERSION}/bonk-aarch64-unknown-linux-musl -o bonk
 curl -fsSL https://github.com/avolkha/bonk/releases/download/${VERSION}/bonk-runner-aarch64-unknown-linux-musl -o bonk-runner
 chmod +x bonk bonk-runner

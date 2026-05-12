@@ -6,6 +6,12 @@ publish = false
 # which triggers release.yml to build and publish the static binaries.
 git_release_enable = true
 
+# Workaround: release-plz tries to canonicalize <crate_dir>/Cargo.lock for every
+# commit, but in a workspace it only exists at the root. This causes every commit
+# to be silently skipped. release_commits replaces that file-check with a regex
+# match against conventional commit messages, bypassing the broken path lookup.
+release_commits = "^(feat|fix|perf)(\\(.*\\))?!?:"
+
 [[package]]
 name = "bonk-cli"
 changelog_path = "../../CHANGELOG.md"

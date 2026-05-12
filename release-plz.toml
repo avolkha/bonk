@@ -2,14 +2,14 @@
 # Don't publish to crates.io — bonk is a binary tool distributed via GitHub Releases
 publish = false
 
+# Use git tags as the version baseline (packages aren't on crates.io).
+# This ensures release-plz detects changes since the last git tag, not since
+# the beginning of the repo.
+git_only = true
+
 # release-plz creates the git tag on Release PR merge,
 # which triggers release.yml to build and publish the static binaries.
 git_release_enable = true
-
-# Only bump on user-visible commits (features, fixes, perf improvements).
-# Pairs with crates/*/Cargo.lock symlinks that let release-plz resolve the
-# workspace Cargo.lock path correctly for each crate.
-release_commits = "^(feat|fix|perf)(\\(.*\\))?!?:"
 
 [[package]]
 name = "bonk-cli"

@@ -1,10 +1,11 @@
 [package]
 name = "bonk-cli"
-version = "0.2.0"
+version.workspace = true
 edition = "2024"
 
 [dependencies]
-bonk-common = { path = "../bonk-common", version = "0.2.0" }
+bonk-common = { path = "../bonk-common" }
+bonk-runner = { path = "../bonk-runner" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"

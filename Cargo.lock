@@ -72,10 +72,11 @@ checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 
 [[package]]
 name = "bonk-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "bonk-common",
+ "bonk-runner",
  "clap",
  "flate2",
  "serde",
@@ -88,7 +89,7 @@ dependencies = [
 
 [[package]]
 name = "bonk-common"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",

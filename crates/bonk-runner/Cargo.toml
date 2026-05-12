@@ -8,7 +8,7 @@ name = "bonk-runner"
 path = "src/main.rs"
 
 [dependencies]
-bonk-common = { path = "../bonk-common" }
+bonk-common = { path = "../bonk-common", version = "0.2.1" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"

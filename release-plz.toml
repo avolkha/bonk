@@ -21,6 +21,8 @@ git_tag_name = "v{{version}}"
 name = "bonk-runner"
 changelog_update = false
 git_release_enable = false
+# bonk-runner is embedded inside bonk output — version is kept in sync with
+# the workspace version so changes to it trigger a bonk-cli release PR.
 
 [[package]]
 name = "bonk-common"

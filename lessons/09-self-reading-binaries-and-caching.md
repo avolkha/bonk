@@ -10,8 +10,10 @@
 4. Computes a cache key and checks if the rootfs is already ready
 5. Extracts embedded tool binaries (bwrap, unsquashfs) to cache directory
 6. Makes the rootfs available at `/tmp/bonk-<hash>/rootfs/` — kernel squashfs loop-mount if privileged (`--mount`), otherwise `unsquashfs` extraction — both cached; skipped on warm runs
-7. Parses user-provided flags (`-v`, `--`) from `argv`
+7. Parses user-provided flags (`-e`, `-v`, `--`) from `argv` using `clap`
 8. Execs embedded bwrap over the rootfs and exits with the container's exit code
+
+The file is structured as a set of focused types and functions that `main` orchestrates — `main` itself is only ~20 lines.
 
 ---
 
@@ -110,48 +112,42 @@ a `/proc/mounts` check + re-mount if it disappeared after reboot) or a plain ext
 (just use it directly). Without this distinction the runner might try to overlay a directory that
 is no longer a squashfs mount, leading to a bwrap permission error.
 
-### Manual argument parsing with `std::env::args()`
+### Argument parsing with `clap`
 
-`clap` is not used in `bonk-runner` — it would add size to the embedded stub. Instead, parse arguments manually:
+`bonk-runner` uses `clap` with the `derive` feature, the same as `bonk-cli`. Annotate a struct and clap generates the full parser — including `--help` and `--version` — automatically:
 
 ```rust
-let args: Vec<String> = std::env::args().collect();
-// args[0] is the program name, args[1..] are the user's arguments
+use clap::Parser;
 
-let mut volumes: Vec<VolumeMount> = Vec::new();
-let mut runtime_env: Vec<String> = Vec::new();
-let mut extra_args: Vec<String> = Vec::new();
-let mut quiet = false;
-let mut saw_sep = false;   // true once we see "--"
+/// A bonk-generated container binary.
+#[derive(Parser)]
+#[command(version = env!("CARGO_PKG_VERSION"))]
+struct Args {
+    /// Set an environment variable inside the container.
+    #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
+    runtime_env: Vec<String>,
 
-let mut i = 1;
-while i < args.len() {
-    let arg = &args[i];
-    if saw_sep {
-        extra_args.push(arg.clone());
-    } else if arg == "--" {
-        saw_sep = true;
-    } else if arg == "-q" || arg == "--quiet" {
-        quiet = true;
-    } else if arg == "-v" || arg == "--volume" {
-        i += 1;
-        // args[i] is the volume spec
-    } else if arg.starts_with("-v") {
-        // inline: "-v/host:/guest"
-        let spec = &arg[2..];  // strip the "-v" prefix
-    } else if arg == "-e" || arg == "--env" {
-        i += 1;
-        // args[i] is "KEY=VALUE"
-        runtime_env.push(args[i].clone());
-    } else if let Some(kv) = arg.strip_prefix("--env=") {
-        runtime_env.push(kv.to_string());
-    } else {
-        extra_args.push(arg.clone());
-        saw_sep = true;  // first non-flag arg: everything after is CMD
-    }
-    i += 1;
+    /// Bind-mount a host path into the container.
+    #[arg(short = 'v', long = "volume", value_name = "HOST:GUEST[:ro]")]
+    volumes: Vec<String>,
+
+    /// Mount the embedded squashfs rootfs (requires root).
+    #[arg(long)]
+    mount: bool,
+
+    /// Suppress progress output.
+    #[arg(short = 'q', long)]
+    quiet: bool,
+
+    /// Command to run inside the container (overrides image's default CMD).
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    extra_args: Vec<String>,
 }
 ```
+
+`trailing_var_arg = true` makes clap collect everything after the last known flag as positional args, including flags that start with `-`. This matches the Docker convention where `./alpine -c "code"` passes `-c "code"` to the container's entrypoint, not to the runner itself.
+
+> **Size note:** `clap` with `derive` adds ~400 KB to the stripped binary (749 KB → ~1.1 MB). For bonk-runner this is acceptable — the tools embedded alongside it (`bwrap` + `unsquashfs`) total ~1.2 MB, so the runner itself is already not the bottleneck. If absolute minimum stub size were required, manual parsing would be the answer.
 
 ### TTY detection with `std::io::IsTerminal`
 
@@ -166,11 +162,60 @@ use std::io::IsTerminal;
 let stdin_is_tty = std::io::stdin().is_terminal();
 ```
 
-The runner should pass this information to the runtime so it can decide whether
-to allocate a pseudo-terminal. In practice, for bwrap-based containers this
-means you **don't** need to do anything special (bwrap doesn't set `terminal`),
-but you should avoid wrapping in `script` or `socat` for TTY emulation unless
-stdin is actually a terminal.
+The runner passes this to `runtime::run` so it can decide whether to pass `--new-session` to bwrap.
+
+### Decomposing a large `main` into focused types
+
+When `main` grows beyond ~50 lines it becomes hard to read and reason about. The solution is not to add comments — it's to extract cohesive units into named types and functions:
+
+```rust
+// Owns parsed CLI flags
+struct Args { ... }
+
+// Owns the executable bytes, footer, and config
+struct BinaryData {
+    exe_data: Vec<u8>,
+    footer: Footer,
+    config: ContainerConfig,
+}
+impl BinaryData {
+    fn load() -> Result<Self> { ... }   // reads /proc/self/exe
+    fn payload(&self) -> &[u8] { ... }  // slice from footer offsets
+}
+
+// Groups all cache paths derived from the payload hash
+struct CachePaths { dir, rootfs, sqfs, marker: PathBuf }
+impl CachePaths {
+    fn new(binary: &BinaryData) -> Self { ... }
+}
+
+// Privileged first-run setup
+fn run_mount_setup(cache: &CachePaths, payload: &[u8], quiet: bool) -> Result<()> { ... }
+
+// Warm/cold start: ensures rootfs is ready, returns rootfs_readonly
+fn prepare_rootfs(binary: &BinaryData, cache: &CachePaths, ...) -> Result<bool> { ... }
+```
+
+With these in place, `main` becomes a ~20-line orchestrator:
+
+```rust
+fn main() -> Result<()> {
+    let args = Args::parse();
+    let binary = BinaryData::load()?;
+    let cache = CachePaths::new(&binary);
+
+    if args.mount {
+        return run_mount_setup(&cache, binary.payload(), args.quiet);
+    }
+
+    let rootfs_readonly = prepare_rootfs(&binary, &cache, &bin_name, args.quiet)?;
+    let tools = extract_embedded_tools(&binary.footer, &binary.exe_data, &cache.dir)?;
+    let status = runtime::run(runtime::RunOpts { ... })?;
+    std::process::exit(status.code().unwrap_or(1));
+}
+```
+
+Each type captures a distinct phase. Naming the phases makes the control flow obvious — you can read `main` top-to-bottom without scrolling through 200 lines of setup logic.
 
 ### `std::process::exit`
 
@@ -190,6 +235,7 @@ Add to `crates/bonk-runner/Cargo.toml`:
 [dependencies]
 bonk-common = { path = "../bonk-common" }
 anyhow = "1"
+clap = { version = "4", features = ["derive"] }
 serde_json = "1"
 ```
 
@@ -203,30 +249,25 @@ In `bonk-runner/src/main.rs`, declare two modules: `mod mount;` and `mod runtime
 
 ## Tasks
 
-### Task 1 — Print usage
+### Task 1 — Define the `Args` struct
 
-If the first argument is `"--help"` or `"-h"`, print a usage message to stdout and exit with code 0. The usage message should explain:
+Define the `Args` struct using `#[derive(Parser)]` as shown in the Concepts section. You'll need `VolumeMount` from `bonk-runner::runtime` — declare a placeholder `pub struct VolumeMount` in `runtime.rs` for now.
 
-- That this is a bonk-generated container binary
-- The `-e, --env KEY=VALUE` flag to set environment variables inside the container (repeatable, appended after image vars, overrides image defaults; no host vars leak implicitly)
-- The `-v HOST:GUEST[:ro]` flag for volume mounts
-- The `-q` / `--quiet` flag to suppress progress output
-- The `--` separator for CMD arguments
-- The `BONK_BWRAP=<path>` environment variable
+Use `trailing_var_arg = true` on `extra_args` so positional arguments (the container command) are collected after all flags, without requiring `--` as a separator.
 
-### Task 2 — Parse arguments
+Note that `clap` now generates `--help` and `--version` for free — no manual printing needed.
 
-Implement the argument parsing loop described in the concepts section. You'll need `VolumeMount` from `bonk-runner::runtime` — declare a placeholder `pub struct VolumeMount` in `runtime.rs` for now, and import it.
+### Task 2 — Parse arguments in `main`
 
-Collect:
-- `volumes: Vec<VolumeMount>` — one per `-v` flag
-- `runtime_env: Vec<String>` — one `KEY=VALUE` string per `-e`/`--env` flag
-- `extra_args: Vec<String>` — CMD override arguments
-- `quiet: bool` — set to `true` if `-q` or `--quiet` is given
-- `stdin_is_tty: bool` — detect with `std::io::stdin().is_terminal()`
+Call `Args::parse()` at the top of `main`. The `volumes` field will be `Vec<String>` at this point — convert each spec to a `VolumeMount` by calling `runtime::VolumeMount::parse(spec)` when building `RunOpts`.
 
-Use the same `log!` macro pattern from lesson 08 to guard progress messages
-behind `!quiet`. The runner should use `log!` for cache extraction messages.
+Derive `stdin_is_tty` inline in `main`:
+
+```rust
+let stdin_is_tty = std::io::stdin().is_terminal();
+```
+
+Use the same `log!` macro pattern from lesson 08 to guard progress messages behind `!quiet`.
 
 ### Task 3 — Read the executable
 
@@ -309,20 +350,18 @@ let status = runtime::run(runtime::RunOpts {
 std::process::exit(status.code().unwrap_or(1));
 ```
 
-### Task 8 — `run()` wrapper
+### Task 8 — Decompose `main` into focused types
 
-Wrap all the above logic in a helper `fn run() -> anyhow::Result<()>` and call it from `main()`:
+Once all the logic is working, refactor `main` using the struct-based decomposition described in the Concepts section. Extract:
 
-```rust
-fn main() {
-    if let Err(e) = run() {
-        eprintln!("bonk: error: {e:#}");
-        std::process::exit(1);
-    }
-}
-```
+- `BinaryData` — owns `exe_data`, `footer`, `config`; has `load() -> Result<Self>` and `payload() -> &[u8]`
+- `CachePaths` — groups `dir`, `rootfs`, `sqfs`, `marker`; has `new(binary: &BinaryData) -> Self`
+- `run_mount_setup(cache, payload, quiet)` — the entire `--mount` branch
+- `prepare_rootfs(binary, cache, bin_name, quiet) -> Result<bool>` — the `match prior_strategy` block
 
-`{e:#}` prints the full error chain including all `.context()` messages.
+After this refactor, `main` should be around 20 lines with no inline logic — just calling into the above.
+
+Verify with `cargo build --package bonk-runner` (no warnings) and re-running `tests/e2e.sh`.
 
 ---
 
@@ -333,6 +372,8 @@ fn main() {
    occur without it if the process was killed mid-extraction?
 3. Why does the runner use a content-based hash (first 4 KB + size) as the
    cache key instead of, say, the full SHA-256 of the payload?
+4. `trailing_var_arg = true` on `extra_args` means `-v` after a positional argument is consumed as part of the command, not as a volume flag. What does this mean for users? Is this the right trade-off?
+5. Why does `BinaryData::payload()` return a `&[u8]` slice rather than a `Vec<u8>`? What would the cost of returning a `Vec<u8>` be?
 
 ---
 

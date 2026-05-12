@@ -538,5 +538,5 @@ You have rebuilt `bonk` from scratch. Here is what you implemented across 10 les
 | 06 | `flatten::open_layer` | trait objects, `Box<dyn Read>`, `Seek`, magic bytes |
 | 07 | `flatten::flatten_layers` | iterators, tar archives, OCI whiteouts, fs operations |
 | 08 | `pack.rs` | shelling out (`Command`), binary file assembly, `0o755` permissions |
-| 09 | `bonk-runner/main.rs` | self-reading binaries, hashing, manual arg parsing, cache management, tool extraction |
+| 09 | `bonk-runner/main.rs` | self-reading binaries, hashing, `clap` derive, struct decomposition, cache management, tool extraction |
 | 10 | `mount.rs` + `runtime.rs` | kernel squashfs loop-mount, `unsquashfs` fallback, embedded tools, `bwrap` overlay, ENTRYPOINT logic |

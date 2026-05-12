@@ -63,6 +63,8 @@ pub fn extract_binary_name(image: &str) -> Result<String> {
     Ok(name.split(':').next().unwrap_or(name).to_string())
 }
 
+// Bonk - container packaging tool
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
